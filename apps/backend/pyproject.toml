@@ -1,0 +1,38 @@
+[project]
+name = "logcopilot"
+version = "0.1.0"
+description = "AIOps log copilot —— P-A 采集阶段（CasePack v1）"
+requires-python = ">=3.11"
+dependencies = []          # 第一步零运行时依赖：domain 层不引框架，见总计划 §5「domain 零 IO、零框架」
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/logcopilot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pyright]
+include = ["src", "tests"]
+extraPaths = ["src"]
+typeCheckingMode = "standard"
+# pyright 不装进 dev 依赖（它是 node 包装器，装起来慢）；
+# 第 2 步的 Makefile 里用 `uvx pyright` 调起来即可。
