@@ -66,14 +66,19 @@ def test_file_stream_matches_sorted(tmp_path: Path) -> None:
     assert [path.name for path in stream.matches(tmp_path)] == ["x.log", "y.log"]
 
 
-def test_hdfs_streams_cover_the_four_sources() -> None:
-    """P-A §1 的清单：NN 主日志 / DN 主日志 / 审计 / GC / stdout。"""
+def test_hdfs_streams_cover_the_three_live_sources() -> None:
+    """P-A §1 的清单减去 GC：GC 要等 `jvm_gc` 档位（O8），现在收进来会污染主日志末条记录。"""
     layout = hdfs_streams()
     by_component: dict[str, list[str]] = {}
     for stream in layout:
         by_component.setdefault(stream.component, []).append(f"{stream.order}:{stream.name}")
-    assert by_component["nn"] == ["0:main", "1:audit", "2:gc", "3:stdout"]
-    assert by_component["dn1"] == ["0:main", "2:gc", "3:stdout"]
+    assert by_component["nn"] == ["0:main", "1:audit", "2:stdout"]
+    assert by_component["dn1"] == ["0:main", "2:stdout"]
+
+
+def test_hdfs_streams_do_not_collect_gc_log() -> None:
+    """显式钉住"不采 GC"这件事，否则它会被悄悄加回来、把 GC 行拼进上一条日志。"""
+    assert not [stream for stream in hdfs_streams() if stream.name == "gc"]
 
 
 # ------------------------------------------------------------------ 解析成具体文件

@@ -93,10 +93,19 @@ def hdfs_streams(components: Sequence[str] = ("nn", "dn1", "dn2", "dn3")) -> tup
 
     - `hadoop-hdfs-namenode-<host>.log` / `...-datanode-<host>.log`：主日志
     - `hdfs-audit.log`：审计日志（P-A §1 决定**要采**，它记录了谁在改集群）
-    - `gc.log`：JVM GC 日志，用来解释"NN 卡住"是不是 GC 停顿
     - `*.out`：stdout/stderr，Hadoop 自己的日志走文件，这里通常几乎为空
 
-    `order` 就是 `ComponentReader` 的读入顺序：主日志 → 审计 → GC → stdout。
+    **GC 日志（`gc.log`）故意不在这张表里**（O8，见 P-A §10）。原因不是没用，而是
+    "现在收进来会污染别的记录"：Java 8 的 GC 行长这样
+
+        2026-11-22T11:46:27.166+0000: 0.123: [GC (Allocation Failure) ...]
+
+    它既不符合 hdfs_log4j 档位（`%d{ISO8601}` 是空格分隔 + 逗号毫秒，没有 `T` 也没有时区后缀），
+    也不符合 lab 档位。而续行判据是"这一行没有时间戳就归上一组"，于是 GC 的每一行都会被当成
+    主日志最后一条记录的续行拼进去 —— 实测 10 行 GC 输出被并进了最后一条 DataNode 日志。
+    要收它，得先加第三个档位 `jvm_gc`；在那之前，`gc.log` 只留在盘上给人看。
+
+    `order` 就是 `ComponentReader` 的读入顺序：主日志 → 审计 → stdout。
     顺序必须写死，不能靠文件名排序（`hadoop-...` 与 `hdfs-audit.log` 的相对
     次序在不同 region 下不一样），更不能靠 mtime。
     """
@@ -111,8 +120,7 @@ def hdfs_streams(components: Sequence[str] = ("nn", "dn1", "dn2", "dn3")) -> tup
         layout.append(FileStream(component, "main", 0, f"{component}/{main}"))
         if audit is not None:
             layout.append(FileStream(component, "audit", 1, f"{component}/{audit}"))
-        layout.append(FileStream(component, "gc", 2, f"{component}/gc.log"))
-        layout.append(FileStream(component, "stdout", 3, f"{component}/*.out"))
+        layout.append(FileStream(component, "stdout", 2, f"{component}/*.out"))
     return tuple(layout)
 
 

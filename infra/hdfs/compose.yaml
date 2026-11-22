@@ -1,0 +1,143 @@
+# HDFS 采集环境：1 NameNode + 3 DataNode（P-A §2）
+#
+# 与旧实验台（aiops-fault-diagnosis-agent/ops/lab）的四处关键差别，都是为了"能被采集"：
+#   1. 日志目录统一到 /opt/hadoop/logs 并 bind mount 出来 —— 采集器的 file 适配器与 docker
+#      适配器读的是同一批字节，这是 V4「两条路径 canonical_sha256 相等」的物理前提。
+#   2. 显式 TZ=UTC —— 旧环境没设，JVM 取容器默认时区，迁回来的 WSL 数据就吃过 +08 的亏。
+#   3. 挂了自写的 log4j.properties：镜像自带的那份只往 stdout 打（旧数据就是这么来的），
+#      新环境要的是「主日志 / 审计 / GC 各一个文件」+ stdout 只留启动脚本的几行。
+#   4. 换掉了 project / 容器 / 主机名（aiops-lab-* → alcp-*）—— 旧集群还在，名字不能撞。
+#
+# dn1 的数据盘是 tmpfs 128m，配合 hdfs-site.xml 的 du.reserved=0，是造 DN_VOLUME 最干净的
+# 手法：dd 写满立刻 DiskOutOfSpaceException + volume failure，且 dn1 重启即恢复。
+#
+# 注意：volumes 在四个 service 里各写一遍。YAML 的锚点只能合并映射、不能合并列表，
+# 用 `- *anchor` 会插进去一个嵌套列表而不是展开它 —— 那会让挂载悄悄失效。
+
+name: aiops-log-copilot
+
+x-hadoop: &hadoop
+  image: apache/hadoop:3.3.6
+  user: "0:0"
+  restart: "no"
+  networks: [hdfs]
+
+services:
+  nn:
+    <<: *hadoop
+    container_name: alcp-nn
+    hostname: nn
+    environment:
+      TZ: "UTC"
+      HADOOP_HEAPSIZE: "512"
+      HADOOP_LOG_DIR: /opt/hadoop/logs
+      HADOOP_LOG_FILE: hadoop-hdfs-namenode-nn.log
+      # Java 8 用 -Xloggc（-Xlog:gc 是 9+ 的写法）；GC 文件名故意不带
+      # "hadoop-hdfs-namenode-" 前缀，否则会被主日志的 glob 一起吃掉（AmbiguousStream）
+      # -Dhadoop.log.file 是文件名的唯一生效入口：launcher 会用自己的默认值（hadoop.log）
+      # 覆盖环境变量 HADOOP_LOG_FILE，所以只能作为系统属性追加进 _OPTS
+      HDFS_NAMENODE_OPTS: >-
+        -Xloggc:/opt/hadoop/logs/gc.log -XX:+PrintGCDetails
+        -XX:+PrintGCDateStamps -XX:+PrintGCTimeStamps
+        -Dhadoop.log.file=hadoop-hdfs-namenode-nn.log
+    # `exec` 只作用于 tee：脚本退出后容器跟着退出，退出码由 tee 透传
+    command:
+      ["/bin/bash", "-o", "pipefail", "-c",
+       "exec /lab/bin/start-namenode.sh 2>&1 | tee -a /opt/hadoop/logs/nn.out"]
+    volumes:
+      - ./conf/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./conf/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - ./conf/log4j.properties:/opt/hadoop/etc/hadoop/log4j.properties:ro
+      - ./bin:/lab/bin:ro
+      - ./inject:/lab/inject:ro
+      - ../../runtime/hdfs-logs/nn:/opt/hadoop/logs
+      - namenode-data:/tmp/hadoop-root/dfs/name
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+
+  dn1:
+    <<: *hadoop
+    container_name: alcp-dn1
+    hostname: dn1
+    environment:
+      TZ: "UTC"
+      HADOOP_HEAPSIZE: "512"
+      HADOOP_LOG_DIR: /opt/hadoop/logs
+      HADOOP_LOG_FILE: hadoop-hdfs-datanode-dn1.log
+      HDFS_DATANODE_OPTS: >-
+        -Xloggc:/opt/hadoop/logs/gc.log -XX:+PrintGCDetails
+        -XX:+PrintGCDateStamps -XX:+PrintGCTimeStamps
+        -Dhadoop.log.file=hadoop-hdfs-datanode-dn1.log
+    command:
+      ["/bin/bash", "-o", "pipefail", "-c",
+       "exec /lab/bin/start-datanode.sh 2>&1 | tee -a /opt/hadoop/logs/dn1.out"]
+    volumes:
+      - ./conf/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./conf/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - ./conf/log4j.properties:/opt/hadoop/etc/hadoop/log4j.properties:ro
+      - ./bin:/lab/bin:ro
+      - ./inject:/lab/inject:ro
+      - ../../runtime/hdfs-logs/dn1:/opt/hadoop/logs
+    # 故意不挂数据卷：数据盘是内存盘，容器重启数据即丢，故障可重复
+    tmpfs:
+      - /tmp/hadoop-root/dfs/data:size=128m
+
+  dn2:
+    <<: *hadoop
+    container_name: alcp-dn2
+    hostname: dn2
+    environment:
+      TZ: "UTC"
+      HADOOP_HEAPSIZE: "512"
+      HADOOP_LOG_DIR: /opt/hadoop/logs
+      HADOOP_LOG_FILE: hadoop-hdfs-datanode-dn2.log
+      HDFS_DATANODE_OPTS: >-
+        -Xloggc:/opt/hadoop/logs/gc.log -XX:+PrintGCDetails
+        -XX:+PrintGCDateStamps -XX:+PrintGCTimeStamps
+        -Dhadoop.log.file=hadoop-hdfs-datanode-dn2.log
+    command:
+      ["/bin/bash", "-o", "pipefail", "-c",
+       "exec /lab/bin/start-datanode.sh 2>&1 | tee -a /opt/hadoop/logs/dn2.out"]
+    volumes:
+      - ./conf/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./conf/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - ./conf/log4j.properties:/opt/hadoop/etc/hadoop/log4j.properties:ro
+      - ./bin:/lab/bin:ro
+      - ./inject:/lab/inject:ro
+      - ../../runtime/hdfs-logs/dn2:/opt/hadoop/logs
+      - dn2-data:/tmp/hadoop-root/dfs/data
+
+  dn3:
+    <<: *hadoop
+    container_name: alcp-dn3
+    hostname: dn3
+    environment:
+      TZ: "UTC"
+      HADOOP_HEAPSIZE: "512"
+      HADOOP_LOG_DIR: /opt/hadoop/logs
+      HADOOP_LOG_FILE: hadoop-hdfs-datanode-dn3.log
+      HDFS_DATANODE_OPTS: >-
+        -Xloggc:/opt/hadoop/logs/gc.log -XX:+PrintGCDetails
+        -XX:+PrintGCDateStamps -XX:+PrintGCTimeStamps
+        -Dhadoop.log.file=hadoop-hdfs-datanode-dn3.log
+    command:
+      ["/bin/bash", "-o", "pipefail", "-c",
+       "exec /lab/bin/start-datanode.sh 2>&1 | tee -a /opt/hadoop/logs/dn3.out"]
+    volumes:
+      - ./conf/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./conf/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - ./conf/log4j.properties:/opt/hadoop/etc/hadoop/log4j.properties:ro
+      - ./bin:/lab/bin:ro
+      - ./inject:/lab/inject:ro
+      - ../../runtime/hdfs-logs/dn3:/opt/hadoop/logs
+      - dn3-data:/tmp/hadoop-root/dfs/data
+
+networks:
+  hdfs:
+    driver: bridge
+
+volumes:
+  namenode-data:
+  dn2-data:
+  dn3-data:

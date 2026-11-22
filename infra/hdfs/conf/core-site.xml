@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<!-- 采集环境的最小 core-site：只要能互相找到、数据落在一片可预期的目录就行。 -->
+<configuration>
+  <!-- 主机名 nn 就是 compose 里的 service/hostname，容器内靠 Docker DNS 解析 -->
+  <property><name>fs.defaultFS</name><value>hdfs://nn:9000</value></property>
+  <!-- 临时目录与 name.dir/data.dir 分开，方便 dn1 用 tmpfs 单独吃掉数据盘 -->
+  <property><name>hadoop.tmp.dir</name><value>/tmp/hadoop</value></property>
+  <property><name>io.file.buffer.size</name><value>4096</value></property>
+</configuration>

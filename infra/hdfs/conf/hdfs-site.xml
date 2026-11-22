@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<!--
+  HDFS 侧参数。每一条都直接决定我们能造出什么故障、以及日志里能不能看到：
+
+  replication=2      → 只有 3 个 DN 时，挂掉 1 台就立刻 Under-replicated（BLOCK_REPLICATION 的前置）
+  du.reserved=0      → 数据盘写满马上报 DiskOutOfSpaceException，不需要等预留空间
+  heartbeat=2s
+  recheck-interval=2000 → 判 dead ≈ 2*2s + 10*2s = 24 秒（默认值是 630 秒，10 分钟的故障窗里等不到）
+                          这两个值必须写进 manifest.config_overrides，否则采集窗口与日志对不上
+  safemode.threshold-pct=0.99 → 99% 块达标才退出安全模式，便于用 safemode 造 NN_SAFE_MODE
+  permissions.enabled=false   → 省掉运维账号，故障注入只关心 HDFS 自身行为
+  client.use.datanode.hostname=true → 客户端用主机名连 DN，日志里写的是 dn1/dn2/dn3 而
+                          不是容器 IP —— component 归一化靠的就是这个
+-->
+<configuration>
+  <property><name>dfs.replication</name><value>2</value></property>
+  <property><name>dfs.namenode.name.dir</name><value>/tmp/hadoop-root/dfs/name</value></property>
+  <property><name>dfs.datanode.data.dir</name><value>/tmp/hadoop-root/dfs/data</value></property>
+  <property><name>dfs.permissions.enabled</name><value>false</value></property>
+  <property><name>dfs.namenode.http-address</name><value>0.0.0.0:9870</value></property>
+  <property><name>dfs.namenode.safemode.threshold-pct</name><value>0.99</value></property>
+  <property><name>dfs.datanode.du.reserved</name><value>0</value></property>
+  <property><name>dfs.heartbeat.interval</name><value>2</value></property>
+  <property><name>dfs.namenode.heartbeat.recheck-interval</name><value>2000</value></property>
+  <property><name>dfs.datanode.disk.check.min.gap</name><value>2s</value></property>
+  <property><name>dfs.client.use.datanode.hostname</name><value>true</value></property>
+</configuration>
