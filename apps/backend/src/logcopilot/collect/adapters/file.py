@@ -95,6 +95,9 @@ def hdfs_streams(components: Sequence[str] = ("nn", "dn1", "dn2", "dn3")) -> tup
     - `hadoop-hdfs-namenode-<host>.log` / `...-datanode-<host>.log`：主日志
     - `hdfs-audit.log`：审计日志（P-A §1 决定**要采**，它记录了谁在改集群）
     - `*.out`：stdout/stderr，Hadoop 自己的日志走文件，这里通常几乎为空
+    - `workload.out`（只在 nn 上）：`hdfs dfs` 客户端日志。它用的是
+      `conf/client-log4j.properties`（pattern 与守护进程一致），所以能被
+      同一个 `hdfs_log4j` 档位解析 —— 这是客户端 ERROR 唯一能进日志的地方
 
     **GC 日志（`gc.log`）故意不在这张表里**（O8，见 P-A §10）。原因不是没用，而是
     "现在收进来会污染别的记录"：Java 8 的 GC 行长这样
@@ -121,7 +124,14 @@ def hdfs_streams(components: Sequence[str] = ("nn", "dn1", "dn2", "dn3")) -> tup
         layout.append(FileStream(component, "main", 0, f"{component}/{main}"))
         if audit is not None:
             layout.append(FileStream(component, "audit", 1, f"{component}/{audit}"))
-        layout.append(FileStream(component, "stdout", 2, f"{component}/*.out"))
+        # stdout 的 pattern 必须写全名：`*.out` 会把下面那条 `workload.out` 也
+        # 匹配进来（同一个 component 两条流命中同一个文件 → AmbiguousStream）。
+        layout.append(FileStream(component, "stdout", 2, f"{component}/{component}.out"))
+        if component == "nn":
+            # 客户端日志：workload 用 `hdfs dfs` 打出来的 ERROR/WARN 全在这里。
+            # 服务端只在"盘坏到 DN 起不来"时才报 ERROR，四族里另外三族的
+            # ERROR 只能靠客户端日志补齐（P-A §1 的第四类来源）。
+            layout.append(FileStream(component, "workload", 3, f"{component}/workload.out"))
     return tuple(layout)
 
 

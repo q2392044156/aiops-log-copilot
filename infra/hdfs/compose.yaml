@@ -48,6 +48,8 @@ services:
       - ./conf/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
       - ./conf/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
       - ./conf/log4j.properties:/opt/hadoop/etc/hadoop/log4j.properties:ro
+      # 客户端那份是给 `hdfs dfs` 用的：pattern 与守护进程一致，客户端日志才解析得动
+      - ./conf/client-log4j.properties:/opt/hadoop/etc/hadoop/client-log4j.properties:ro
       - ./bin:/lab/bin:ro
       - ./inject:/lab/inject:ro
       - ../../runtime/hdfs-logs/nn:/opt/hadoop/logs
@@ -76,6 +78,8 @@ services:
       - ./conf/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
       - ./conf/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
       - ./conf/log4j.properties:/opt/hadoop/etc/hadoop/log4j.properties:ro
+      # 客户端那份是给 `hdfs dfs` 用的：pattern 与守护进程一致，客户端日志才解析得动
+      - ./conf/client-log4j.properties:/opt/hadoop/etc/hadoop/client-log4j.properties:ro
       - ./bin:/lab/bin:ro
       - ./inject:/lab/inject:ro
       - ../../runtime/hdfs-logs/dn1:/opt/hadoop/logs
@@ -103,6 +107,8 @@ services:
       - ./conf/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
       - ./conf/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
       - ./conf/log4j.properties:/opt/hadoop/etc/hadoop/log4j.properties:ro
+      # 客户端那份是给 `hdfs dfs` 用的：pattern 与守护进程一致，客户端日志才解析得动
+      - ./conf/client-log4j.properties:/opt/hadoop/etc/hadoop/client-log4j.properties:ro
       - ./bin:/lab/bin:ro
       - ./inject:/lab/inject:ro
       - ../../runtime/hdfs-logs/dn2:/opt/hadoop/logs
@@ -128,6 +134,8 @@ services:
       - ./conf/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
       - ./conf/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
       - ./conf/log4j.properties:/opt/hadoop/etc/hadoop/log4j.properties:ro
+      # 客户端那份是给 `hdfs dfs` 用的：pattern 与守护进程一致，客户端日志才解析得动
+      - ./conf/client-log4j.properties:/opt/hadoop/etc/hadoop/client-log4j.properties:ro
       - ./bin:/lab/bin:ro
       - ./inject:/lab/inject:ro
       - ../../runtime/hdfs-logs/dn3:/opt/hadoop/logs

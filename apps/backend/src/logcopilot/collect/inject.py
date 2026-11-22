@@ -264,8 +264,84 @@ def network_disconnect(
 
 
 #: 家族 → 构造器。`--dry-run` 与采集编排都从这里取剧本。
+def dn_disk_broken(
+    *,
+    container: str = "alcp-dn2",
+    volume: str = "aiops-log-copilot_dn2-data",
+    duration: timedelta = timedelta(minutes=5),
+    image: str = "apache/hadoop:3.3.6",
+) -> InjectionPlan:
+    """`DN_VOLUME` 的重症变体：把 `current/` 换成一个普通文件，DN 起不来。
+
+    为什么需要它：**服务端日志里的 ERROR 只在 DN 致命失败时出现**。写满盘
+    （`dn_volume_fill`）只会让 NN 反复说"副本放不下"，DN 自己不喊 —— 四族里
+    三族因此永远拿不到 ERROR 样例。这个变体制造的是真实的启动失败：
+
+        ERROR org.apache.hadoop.hdfs.server.datanode.DataNode:
+            Exception in secureMain: java.io.IOException:
+            File /tmp/hadoop-root/dfs/data/current exists but is not a directory
+
+    dn1 用 tmpfs、没有命名卷，所以只能拿 dn2/dn3 做（卷在重建容器后仍然在，
+    坏掉的 `current` 才留得住）。复原是"删掉那个文件、重启容器"，DN 会重新
+    格式化该卷 —— 卷里的块丢失，集群先欠副本、再由另外两台补齐，这是可接受的
+    实验代价（`replication=3` 保证不会真丢数据）。
+    """
+    return InjectionPlan(
+        name="inject/dn_disk_broken",
+        family="dn_volume",
+        target=container,
+        apply=(
+            Command(("docker", "stop", container), note="先停容器，卷才空得出来"),
+            Command(
+                (
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--user",
+                    "0:0",
+                    "--entrypoint",
+                    "sh",
+                    "-v",
+                    f"{volume}:/d",
+                    image,
+                    "-c",
+                    "rm -rf /d/current && echo broken > /d/current",
+                ),
+                note="把 current/ 换成普通文件：DN 启动时必然抛 IOException",
+            ),
+            Command(("docker", "start", container), note="启动后它会立刻退出，这才是故障"),
+        ),
+        restore=(
+            Command(("docker", "stop", container), expect_ok=False, note="已经退出时这里是空操作"),
+            Command(
+                (
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--user",
+                    "0:0",
+                    "--entrypoint",
+                    "sh",
+                    "-v",
+                    f"{volume}:/d",
+                    image,
+                    "-c",
+                    "rm -f /d/current",
+                ),
+            ),
+            Command(("docker", "start", container)),
+        ),
+        verify=Command(
+            ("docker", "inspect", "-f", "{{.State.Running}}", container), expected_stdout="true"
+        ),
+        duration=duration,
+        note="数据目录不可用 → DN 启动失败 → 服务端 ERROR + NN 副本不足",
+    )
+
+
 INJECTIONS: Mapping[str, Callable[..., InjectionPlan]] = {
     "dn_volume": dn_volume_fill,
+    "dn_disk_broken": dn_disk_broken,
     "dn_heartbeat_pause": dn_heartbeat_pause,
     "dn_heartbeat_stop": dn_heartbeat_stop,
     "nn_safemode": nn_safemode_enter,

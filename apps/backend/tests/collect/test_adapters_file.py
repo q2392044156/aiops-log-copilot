@@ -66,14 +66,27 @@ def test_file_stream_matches_sorted(tmp_path: Path) -> None:
     assert [path.name for path in stream.matches(tmp_path)] == ["x.log", "y.log"]
 
 
-def test_hdfs_streams_cover_the_three_live_sources() -> None:
+def test_hdfs_streams_cover_the_live_sources() -> None:
     """P-A §1 的清单减去 GC：GC 要等 `jvm_gc` 档位（O8），现在收进来会污染主日志末条记录。"""
     layout = hdfs_streams()
     by_component: dict[str, list[str]] = {}
     for stream in layout:
         by_component.setdefault(stream.component, []).append(f"{stream.order}:{stream.name}")
-    assert by_component["nn"] == ["0:main", "1:audit", "2:stdout"]
+    # nn 多一条 workload：客户端 ERROR 只在 `hdfs dfs` 的日志里，服务端四族里有三族从不打 ERROR。
+    assert by_component["nn"] == ["0:main", "1:audit", "2:stdout", "3:workload"]
     assert by_component["dn1"] == ["0:main", "2:stdout"]
+
+
+def test_stdout_pattern_does_not_swallow_the_client_log(tmp_path: Path) -> None:
+    """`{c}/*.out` 会把 `workload.out` 也匹配进来 → AmbiguousStream，pattern 必须写全名。"""
+    write(tmp_path / "nn/nn.out", "x\n")
+    write(tmp_path / "nn/workload.out", "y\n")
+    adapter = FileAdapter(tmp_path, hdfs_streams(("nn",)))
+    specs = {stream.name: stream.path for stream in adapter.streams()}
+    stdout = specs["stdout"]
+    workload = specs["workload"]
+    assert stdout is not None and stdout.endswith("nn.out")
+    assert workload is not None and workload.endswith("workload.out")
 
 
 def test_hdfs_streams_do_not_collect_gc_log() -> None:

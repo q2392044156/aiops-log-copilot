@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -62,6 +63,7 @@ CONTAINERS = {component: f"alcp-{component}" for component in COMPONENTS}
 LOGS_ROOT = REPO_ROOT / "runtime" / "hdfs-logs"
 CASES_ROOT = REPO_ROOT / "data" / "cases"
 WORKLOAD_PATH = "/lab/bin/workload.sh"
+STOP_PATH = "/opt/hadoop/logs/.workload-stop"
 
 
 def _sources() -> tuple[SourceSpec, ...]:
@@ -95,15 +97,28 @@ def _workload(action: str) -> None:
 
     空载集群几乎不写日志 —— 没有负载的"正常样本"会是一段死水，
     P-B 的模板挖掘和 P-C 的上下文都无从谈起。
+
+    停机是**协作式**的：先建哨兵文件让循环自己退出（当前那次 `hdfs dfs -put`
+    会写完），等 15 秒还没退才 `pkill`。直接 kill 会掐断写管线，DN 立刻打
+    `DataXceiver error processing WRITE_BLOCK operation` 的 ERROR —— 实测这样
+    会在故障窗口外凭空多出 3 条 ERROR，把 V6 的门槛顶成噪声。
     """
-    argv = ["docker", "exec"]
     if action == "start":
-        argv += ["-d", CONTAINERS["nn"], WORKLOAD_PATH]
-    else:
-        argv += [CONTAINERS["nn"], "pkill", "-f", WORKLOAD_PATH]
-    code, out = docker_runner(argv)
-    if code != 0:
-        print(f"[warn] 负载 {action} 失败（{code}）：{out.strip()[:200]}")
+        argv = ["docker", "exec", "-d", CONTAINERS["nn"], WORKLOAD_PATH]
+        code, out = docker_runner(argv)
+        if code != 0:
+            print(f"[warn] 负载启动失败（{code}）：{out.strip()[:200]}")
+        return
+
+    docker_runner(["docker", "exec", CONTAINERS["nn"], "touch", STOP_PATH])
+    for _ in range(15):
+        probe = ["docker", "exec", CONTAINERS["nn"], "pgrep", "-f", WORKLOAD_PATH]
+        code, _out = docker_runner(probe)
+        if code != 0:  # pgrep 找不到进程 = 已经干净退出
+            return
+        time.sleep(1)
+    print("[warn] 负载 15 秒内没退出，强制结束（这一轮可能有截断写入）")
+    docker_runner(["docker", "exec", CONTAINERS["nn"], "pkill", "-f", WORKLOAD_PATH])
 
 
 def _describe(report: CollectReport) -> str:

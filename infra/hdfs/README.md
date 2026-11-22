@@ -28,6 +28,7 @@ docker compose down -v        # 连数据卷一起删（NN 的元数据也没了
 | `hadoop-hdfs-datanode-dn{1,2,3}.log` | DataNode | ✅ main | 主日志 |
 | `hdfs-audit.log` | NameNode | ✅ audit | 只有 NN 有；`additivity=false` 保证不重复进主日志 |
 | `nn.out` / `dn{1,2,3}.out` | 启动脚本 | ✅ stdout | 容器 stdout，通常只有一两行 |
+| `nn/workload.out` | `hdfs dfs` 客户端 | ✅ workload（nn 的第 4 条流） | 客户端日志：断网时打 `Excluding datanode`，副本放不下时打 `Slow waitForAckedSeqno` —— 服务端不说"谁写失败了" |
 | `gc.log` | JVM | ❌ **暂不采** | Java 8 GC 格式没有对应解析档位，收进来会被当成上一条日志的续行（O8） |
 | `hdfs-security.log` | 安全日志 | ❌ | 权限关闭时为空 |
 
@@ -82,6 +83,7 @@ bash inject/dn_volume_restore.sh             # 删掉填盘文件并确认 df �
 | `DN_HEARTBEAT` | `dn_heartbeat_stop.sh` / `dn_heartbeat_start.sh` | `docker stop`：进程没了，重启重新注册块 |
 | `NN_SAFE_MODE` | `nn_safemode_enter.sh` / `nn_safemode_leave.sh` | `dfsadmin -safemode enter/leave` |
 | `NETWORK_CONNECTIVITY` | `net_disconnect.sh` / `net_connect.sh` | `docker network disconnect/connect`（不需要 NET_ADMIN） |
+| `DN_VOLUME`（重症） | 走 Python 编排，无 bash 版 | `dn_disk_broken`：把 dn2 卷里的 `current/` 换成普通文件 → DN 启动即失败 → **服务端 ERROR** |
 
 **采集链路不调 bash**：`collect/inject.py` 自己拼同样的 docker 命令（`InjectionPlan`）。
 这些脚本是给人在终端里复现用的，两边命令必须一致，改了这边记得改那边。
@@ -104,6 +106,11 @@ docker exec alcp-nn pkill -f /lab/bin/workload.sh
 ```
 
 `scripts/collect_case.py` 会自己起停它（`--no-workload` 可关掉）。
+
+停机是**协作式**的：`touch /opt/hadoop/logs/.workload-stop`，循环在两次迭代之间
+自己退出，当前那次 `put` 会写完。别用 `pkill` —— 掐断写管线会让 DN 在故障窗口
+之外凭空打 3 条 `DataXceiver error processing WRITE_BLOCK` 的 ERROR，V6 的门槛
+就被噪声顶起来了（实测记录见 `collect_case.py` 的 `_workload`）。
 负载是**真读写**：`put` 触发 DN 的 `BlockReceiver` 日志、`cat` 触发读、
 `rm` 触发删除，三条路径都会在日志里留下可被采集到的痕迹 —— 不是往 `.log` 里
 `echo` 假行（那是自己伪造语料）。

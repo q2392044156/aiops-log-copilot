@@ -360,6 +360,8 @@ data/cases/<case_id>/
 > **V6 v0.4：从"ERROR >= 1"改成"非 INFO >= 1"**。2026-11-22 在真实集群上采第一个 `DN_VOLUME` 故障例（把 dn1 的 128MB tmpfs 写满）时，`ERROR` 是 **0** —— HDFS 盘满的日志表现就是持续 WARN（`Not able to place enough replicas` 之类），ERROR 只在 DN **启动失败**时出现（旧语料 28 例的 ERROR 全是 `DiskChecker$DiskErrorException` / `Failed to acquire lock`，不是"盘满"本身）。把"ERROR >= 1"当红线，意味着四族里只有"能造出启动失败"的那一两个变体才合格，其余全被判死；而人能"凭实测填"的 expect 会因此被迫往上抬，校验就变成了自证。
 >
 > 现在的三条是**正向断言**：门槛不全 0、实测 ERROR/WARN 各自达标、`expect.error_components` 里点名的组件真的出过非 INFO 记录。**刻意不做反向断言**（"expect 之外的组件不许报错"）：故障会级联，上游出事、下游跟着 WARN 是正常的；拿反向去卡只会让真实样本过不了。`expect.error_components` 的语义也随之放宽成"哪个组件会出现非 INFO 记录"，字段名沿用是为了不动 schema。
+> **O10（已知空洞）：`NN_SAFE_MODE` 造不出非 INFO 证据。** 2026-11-22 实采 `inc_safemode_01`（`dfsadmin -safemode enter` 2 分钟）的实测：故障段 212 条记录里 **211 条 INFO、1 条与故障无关的 WARN、0 条 ERROR**。机制是：安全模式是 NN 的**保护动作**，NN 只在主日志记一条 INFO（`Safe mode is ON`）、在审计日志记 `safemode_get/enter`，DN 侧什么也不记；客户端被拒时打的是 FsShell 纯文本（`Name node is in safe mode.`），不是 log4j 行。要给它造出 WARN，只能制造"块缺失型"安全模式（停 DN 到 `safemode.threshold.pct=0.99` 以下），那是另一个注入变体，本期不做。**P-E 评测必须知道：这一族只有 INFO 判别信息**，不能按"有没有非 INFO"来算召回。
+
 
 ---
 
