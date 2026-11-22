@@ -1,4 +1,4 @@
-# 顺序 0 · 取数（adapter）：把容器里的字节变成一行行原文，喂给节点 1
+# 顺序 0a · 取数（adapter）协议：把字节变成一行行原文，喂给节点 1 的翻译
 """`collect/adapters/base.py` —— 取数段的协议，不是任何具体适配器。
 
 ## 为什么先有协议、后有实现
@@ -135,9 +135,13 @@ class StreamReader(Protocol):
     生命周期：`adapter.open(spec)` → `read(state)` 逐行产出 → `state()`
     取走进度。`read` 是**生成器**，边读边改内部进度，所以中途停下也能拿到
     一个可用的 checkpoint（续采就靠这个）。
+
+    `spec` 声明成只读 property，而不是普通属性：真实实现里它是只读属性，
+    若这里声明成可变属性，类型检查器会认为"可写"是套件的硬要求而拒绝实现类。
     """
 
-    spec: StreamSpec
+    @property
+    def spec(self) -> StreamSpec: ...
 
     def read(self, state: AdapterState | None = None) -> Iterator[RawLine]:
         """从 `state` 指示的位置往后读，逐行产出 `(line_no 占位, 原文)`。
