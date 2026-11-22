@@ -1,4 +1,6 @@
-"""CasePack v1 的磁盘读写：建目录、流式追加、`finalize`、两个哈希、原子写。
+# 顺序 4–8 · 打包：建包 → 流式写 → finalize（排序/哈希/manifest）→ 读回
+"""
+CasePack v1 的磁盘读写：建目录、流式追加、`finalize`、两个哈希、原子写。
 
 这是 P-A 里**唯一**知道 CasePack 目录长什么样的模块。`domain/case.py` 只管
 "字段合不合法"，这里管"字节怎么落到盘上"。P-B / P-C / P-E 读 pack 也只经过

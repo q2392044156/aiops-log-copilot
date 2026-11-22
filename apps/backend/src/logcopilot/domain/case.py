@@ -1,4 +1,6 @@
-"""CasePack v1 的"身份证"与"标注" —— `manifest.json` 与 `labels.json`。
+# 顺序 3 · 元信息与标注：manifest.json + labels.json（节点 6 的 finalize 负责写入）
+"""
+CasePack v1 的"身份证"与"标注" —— `manifest.json` 与 `labels.json`。
 
 一个 CasePack 目录里有四个文件，本文件负责其中两个的**结构与取值规则**：
 
@@ -495,7 +497,10 @@ class AdapterState:
     """一个源的读取进度（P-A §6.1）。续采靠它做到"不重不漏"。
 
     ``offset``    已消费到的字节偏移，恢复时从 offset+1 读
-    ``line_no``   已消费到的**源文件绝对物理行号** —— 它就是 id 里的那个号
+    ``line_no``   这条流**最后贡献的全局编号** —— 也就是 `id` 里的那个号。
+                  注意它由 `collect/adapters/base.ComponentReader` 统一发号，
+                  适配器上报的物理行号会被改写掉：一个组件有多份文件
+                  （主日志 / GC / audit）时，编号必须跨文件连续，否则撞号
     ``inode``     文件被轮转/重建就变，变了就必须从头采（单靠 offset 会错位）
     ``tail_line_sha1``  最后一行原文的 sha1，恢复前先 tail 校验，防"文件被改写过"
     """

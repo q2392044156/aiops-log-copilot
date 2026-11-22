@@ -1,4 +1,6 @@
-"""CasePack v1 的日志行类型 —— `logs.jsonl` 的一行。
+# 顺序 2 · 质检：logs.jsonl 的一行。节点 1 构造它时触发校验，节点 6 把它落盘
+"""
+CasePack v1 的日志行类型 —— `logs.jsonl` 的一行。
 用于表示日志行的结构，以及校验字段的取值范围。
 
 规格来源 `P-A_COLLECT_PLAN.md`：

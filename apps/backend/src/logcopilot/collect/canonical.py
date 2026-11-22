@@ -1,3 +1,4 @@
+# 顺序 1 · 翻译的第一步与第二步：解析 + 续行归并（第三步脱敏在 redact.py）
 """canonicalize —— A2 的前两步：解析 + 续行归并。
 
 规格来源 `P-A_COLLECT_PLAN.md`：
