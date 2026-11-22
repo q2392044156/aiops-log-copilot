@@ -1,4 +1,5 @@
 """CasePack v1 的日志行类型 —— `logs.jsonl` 的一行。
+用于表示日志行的结构，以及校验字段的取值范围。
 
 规格来源 `P-A_COLLECT_PLAN.md`：
   §5     字段表，以及 id / ts / raw / component 的取值规则
@@ -22,6 +23,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any, Final, TypeVar
 
+# 常量定义
 #: component 闭集。容器名（namenode / datanode1：`aiops-lab-dn1` 之类）由
 #: canonical 层统一映射到这四个短名，domain 层只认短名 —— 这样 counters 的
 #: by_component 才能跨数据源对账（P-A §5）。
