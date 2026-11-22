@@ -132,8 +132,10 @@ def test_happy_path_returns_ordered_injection_and_verifies_restore() -> None:
     assert result.script == "inject/dn_heartbeat_pause"
     assert result.started <= result.ended <= result.restored  # type: ignore[operator]
     assert result.restored_ok is True
-    assert flushed == [1]  # 注入前 flush 过一次
-    assert sleeps == [600.0]  # 故障段就是真睡 10 分钟
+    # 注入前 1 次 + 故障段每秒 1 次：故障期间指标/日志必须一直在落盘，
+    # 否则 10 分钟的故障段会变成"前后两个点"。
+    assert len(flushed) == 1 + 600
+    assert sleeps == [1.0] * 600  # 600 秒，代价是每次只睡 1 秒
     assert runner.called_with("docker pause")
     assert runner.called_with("docker unpause")
 

@@ -111,6 +111,19 @@ def line_sha1(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
+def last_line_sha1(data: bytes) -> str | None:
+    """一段完整行文本里最后一行的 sha1（口径与 FileReader._tail_before 一致）。
+
+    file 与 docker 两个适配器的 prime() 都用它：一边读本地文件、一边读
+    docker exec tail -c，只要规则一样，两条路径算出来的 tail 就一样。
+    """
+    if not data:
+        return None
+    body = data[:-1] if data.endswith(b"\n") else data
+    cut = body.rfind(b"\n")
+    return line_sha1(decode_line(body[cut + 1 :] + b"\n"))
+
+
 @dataclass(frozen=True, slots=True)
 class StreamSpec:
     """一条物理日志流的身份。
@@ -204,6 +217,26 @@ class SourceAdapter(Protocol):
 
     def open(self, spec: StreamSpec) -> StreamReader:
         """打开一条流。打开时**不读**任何字节（生成器在 `read` 里才动）。"""
+        ...
+
+
+class PrimingAdapter(Protocol):
+    """支持"从现在开始采"的适配器（file / docker 都实现了）。
+
+    单独一个协议而不是塞进 `SourceAdapter`：测试里的假适配器只需要能
+    `streams` / `open`，不该为了类型检查凭空补一个 `prime`。
+    """
+
+    def prime(self) -> Mapping[str, AdapterState]:
+        """把每条流的起点挪到"现在"。
+
+        现场采基线时不能把**已经跑过的启动日志**一锅端进来：主日志里的
+        `STARTUP_MSG` 带 22KB classpath，一进来就把 5 分钟窗口塞满，采出来的
+        是"启动日志分布"而不是"这 5 分钟的运行状态"。
+
+        所以基线采集先把 offset 推到文件末尾（`tail -f` 语义），返回每个流
+        的 `AdapterState`（key 与 checkpoint 一致，形如 `dn1:main`）。
+        """
         ...
 
 

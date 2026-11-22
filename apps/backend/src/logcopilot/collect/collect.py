@@ -50,6 +50,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -64,6 +65,7 @@ from logcopilot.collect.canonical import (
     assert_within_window,
     canonicalize,
 )
+from logcopilot.collect.metrics import MetricsSession, MetricsWriter
 from logcopilot.domain.case import (
     REDACT_RULES,
     AdapterState,
@@ -221,7 +223,10 @@ class InjectionHook(Protocol):
     "注入之前采到的行"可能还留在缓冲里，事后无法证明注入前系统是好的。
     """
 
-    name: str
+    # 只读属性而不是可变字段：`CommandInjection` 用 `@property name` 实现，
+    # pyright 会认为"可变字段"与"只读属性"不兼容（同 StreamReader.spec 的坑）。
+    @property
+    def name(self) -> str: ...
 
     def __call__(self, flush: Callable[[], None]) -> FaultInjection: ...
 
@@ -295,10 +300,12 @@ class Collector:
         "_clock",
         "_created_at",
         "_labels",
+        "_metrics",
         "_profile",
         "_redactor",
         "_root",
         "_sources",
+        "_start_at_end",
         "_window",
     )
 
@@ -314,6 +321,8 @@ class Collector:
         redactor: Redactor | None = None,
         created_at: datetime | None = None,
         clock: Callable[[], datetime] | None = None,
+        metrics: MetricsSession | None = None,
+        start_at_end: bool = False,
     ) -> None:
         if labels.case_id != case_id:
             raise CollectError(f"labels.case_id={labels.case_id!r} 与 case_id={case_id!r} 不一致")
@@ -332,6 +341,8 @@ class Collector:
         self._redactor = redactor
         self._created_at = created_at
         self._clock = clock if clock is not None else (lambda: datetime.now(UTC))
+        self._metrics = metrics
+        self._start_at_end = start_at_end
 
     # ------------------------------------------------------------ 对外
 
@@ -341,11 +352,19 @@ class Collector:
         mode: CollectMode = CollectMode.BASELINE,
         hook: InjectionHook | None = None,
         check_window: bool = True,
+        follow_until: datetime | None = None,
+        poll_interval: float = 2.0,
+        sleeper: Callable[[float], None] | None = None,
     ) -> CollectReport:
         """跑一次采集并 finalize。
 
         `mode=ATTACH` 时要求目录里已经有 `checkpoint.json`（也就是上一次
         采集中断过）；否则报错，而不是悄悄从头再来一遍。
+
+        `follow_until` 给了就进入**跟随模式**：反复 drain 直到这个时刻，
+        每次之间 sleep `poll_interval` 秒。不给就只 drain 一轮（单测默认）。
+        真实采集必须给 —— 5 分钟的正常态样本不是"读一次现有日志"，而是
+        "盯着日志看 5 分钟"。
         """
         paths = pack_paths(self._root, self._case_id)
 
@@ -353,6 +372,13 @@ class Collector:
             raise CollectError("inject 模式必须给 hook —— 否则采出来的是个普通样本")
         if mode is not CollectMode.INJECT and hook is not None:
             raise CollectError(f"{mode.value} 模式不该有 hook")
+        if follow_until is not None and follow_until > self._window.until:
+            raise CollectError(
+                f"follow_until={follow_until.isoformat()} 超出窗口上界 "
+                f"{self._window.until.isoformat()} —— 多出来的行会被质检拒收"
+            )
+        if poll_interval <= 0:
+            raise CollectError("poll_interval 必须大于 0")
 
         resuming = mode is CollectMode.ATTACH
         if resuming:
@@ -366,29 +392,83 @@ class Collector:
             # attach 会以为"这不是一次中断的采集"，把一个可续采的现场
             # 判成不可续采。空 checkpoint 表示"这次采集开过头，一行没成"。
             self._save_checkpoint(paths, acc)
+            if self._start_at_end:
+                # "从现在开始采"：把每条流推到文件末尾再落一次 checkpoint。
+                # 不这么做的话，第一次 drain 会把集群启动时的 22KB 启动日志
+                # 一口吞进 5 分钟窗口，采出来的是"启动分布"而不是运行状态。
+                for spec in self._sources:
+                    prime = getattr(spec.adapter, "prime", None)
+                    if prime is None:
+                        raise CollectError(
+                            f"{spec.source} 的适配器不支持 start_at_end —— "
+                            "要么换一个支持 prime() 的适配器，要么关掉这个选项"
+                        )
+                    acc.states.update(prime())
+                self._save_checkpoint(paths, acc)
 
         injection: FaultInjection | None = None
         raw_before = acc.raw_lines
         writer = open_log_writer(paths)
+        # 指标写者与 logs 写者同生共死：一次采集要么两条腿都有，要么都没有。
+        metrics_writer = MetricsWriter(paths.metrics) if self._metrics is not None else None
+
+        def progress() -> None:
+            """采集进度的安全点：把已采的行与已采的指标都落盘。
+
+            `inject` 模式的自定义 hook 在故障段里每秒调它一次 —— 所以故障
+            持续 10 分钟时，指标不是"注入前后各一个点"，而是 600 秒的连续
+            曲线。这正是"日志说 DN 死了、指标说 dead_datanodes 从 3 掉到 2"
+            能对上的前提。
+            """
+            writer.flush()
+            self._sample_metrics(metrics_writer)
+
         try:
-            self._drain_all(paths, writer, acc, check_window=check_window)
+            if follow_until is None or mode is CollectMode.INJECT:
+                self._drain_all(paths, writer, acc, check_window=check_window)
+                self._sample_metrics(metrics_writer)
+            else:
+                self._follow(
+                    paths,
+                    writer,
+                    acc,
+                    metrics_writer,
+                    until=follow_until,
+                    poll_interval=poll_interval,
+                    sleeper=sleeper,
+                    check_window=check_window,
+                )
 
             if mode is CollectMode.INJECT:
                 # 先 flush 再注入：注入前那一刻的日志必须已经在盘上，
                 # 否则事后无法证明"注入前系统是好的"。
                 assert hook is not None  # 上面已经挡过，这里给类型检查看
-                writer.flush()
-                injection = hook(writer.flush)
+                injection = hook(progress)
                 if not isinstance(injection, FaultInjection):
                     raise CollectError(
                         f"hook {hook.name!r} 必须返回 FaultInjection，"
                         f"拿到 {type(injection).__name__}"
                     )
                 write_labels(paths, replace(self._labels, fault_injection=injection))
-                # 第二轮：注入之后新写出来的日志（故障段）。
-                self._drain_all(paths, writer, acc, check_window=check_window)
+                # 第二轮：注入之后新写出来的日志（故障段/恢复段）。
+                if follow_until is None:
+                    self._drain_all(paths, writer, acc, check_window=check_window)
+                    self._sample_metrics(metrics_writer)
+                else:
+                    self._follow(
+                        paths,
+                        writer,
+                        acc,
+                        metrics_writer,
+                        until=follow_until,
+                        poll_interval=poll_interval,
+                        sleeper=sleeper,
+                        check_window=check_window,
+                    )
         finally:
             writer.close()
+            if metrics_writer is not None:
+                metrics_writer.close()
 
         manifest = self._build_manifest(acc, created_at, injection)
         final = finalize(
@@ -480,6 +560,62 @@ class Collector:
             # 已完成组件与这个组件开始前的状态仍然有效，照样落盘。
             self._save_checkpoint(paths, acc)
             raise
+
+    # ------------------------------------------------------------ 内部：跟随
+
+    def _follow(
+        self,
+        paths: CasePackPaths,
+        writer: LogWriter,
+        acc: _Accumulator,
+        metrics_writer: MetricsWriter | None,
+        *,
+        until: datetime,
+        poll_interval: float,
+        sleeper: Callable[[float], None] | None,
+        check_window: bool,
+    ) -> None:
+        """反复 drain 直到 `until`。
+
+        为什么不能"读一次就完"：`FileReader` 每次只拿**当下已有**的行。
+        5 分钟的正常态样本要的是"这 5 分钟里又长了什么"，所以必须每隔
+        `poll_interval` 再读一次。每轮都 drain 全部来源，每轮都存 checkpoint
+        与指标 —— 中途 Ctrl-C 也只丢最后一轮。
+
+        时间从 `self._clock()` 取而不是 `time.monotonic()`：一是保持与
+        `created_at`/`last_ts` 同一时间源，二是测试可以喂假时钟。
+        """
+        sleep = sleeper if sleeper is not None else time.sleep
+        if self._clock() >= until:
+            # 时间已经到了就没有"跟随"可言，但仍读一轮：调用方可能只想
+            # 把现有日志收干净（例如 attach 之后补最后一段）。
+            self._drain_all(paths, writer, acc, check_window=check_window)
+            self._sample_metrics(metrics_writer)
+            return
+        rounds = 0
+        while True:
+            self._drain_all(paths, writer, acc, check_window=check_window)
+            self._sample_metrics(metrics_writer)
+            rounds += 1
+            now = self._clock()
+            if now >= until:
+                break
+            sleep(min(poll_interval, (until - now).total_seconds()))
+
+    def _sample_metrics(self, metrics_writer: MetricsWriter | None) -> None:
+        """采这一拍到期的指标点。
+
+        没有配 `metrics`（单测里一般不配）就什么都不做 —— `metrics.jsonl`
+        保持 0 字节，与迁移来的 pack 一样，不会伪造出一个"看起来有指标"
+        的样本。
+        """
+        if metrics_writer is None or self._metrics is None:
+            return
+        points = self._metrics.tick(self._clock())
+        if points:
+            # `MetricsWriter.append` 吃的是可迭代 —— 一拍可能同时出好几条
+            # （一次 hdfs_report 会带 report + safemode 两个点）。
+            metrics_writer.append(points)
 
     # ------------------------------------------------------------ 内部：状态
 

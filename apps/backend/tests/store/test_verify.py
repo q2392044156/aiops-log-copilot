@@ -79,7 +79,12 @@ def make_record(
 
 
 def build_pack(
-    root: Path, case_id: str, records: list[LogRecord], *, raw_lines: int | None = None
+    root: Path,
+    case_id: str,
+    records: list[LogRecord],
+    *,
+    raw_lines: int | None = None,
+    origin_kind: OriginKind = OriginKind.MIGRATED,
 ) -> Path:
     """建一个完整 pack（走真实的 create → append → finalize 路径）。"""
     paths = pack_paths(root, case_id)
@@ -88,14 +93,19 @@ def build_pack(
         for record in records:
             writer.append(record)
 
+    # 两种来源的必填项不同（`Origin` 自己会交叉校验）：迁移例必须带 incident 摘要，
+    # 现场采集例必须**不**带（它没有上游病历）。
+    if origin_kind is OriginKind.MIGRATED:
+        origin = Origin(kind=origin_kind, src="ops/lab", incident_sha256="sha256:" + "a" * 64)
+    else:
+        origin = Origin(kind=origin_kind, src=None)
+
     manifest = CaseManifest(
         case_id=case_id,
         created_at=T0,
         canonical_profile=CanonicalProfile.LAB,
         window=Window(since=T0, until=T0 + timedelta(minutes=10)),
-        origin=Origin(
-            kind=OriginKind.MIGRATED, src="ops/lab", incident_sha256="sha256:" + "a" * 64
-        ),
+        origin=origin,
         sources=(SourceRef(adapter=Adapter.FILE, ref="ops/lab/x.log", component="dn1"),),
         counters=Counters(
             raw_lines=raw_lines if raw_lines is not None else len(records),
@@ -318,6 +328,29 @@ def test_verify_reports_extra_and_missing(tmp_path: Path) -> None:
     assert not report.ok
     assert report.extra == ("new_case",)
     assert report.missing == ("gone_case",)
+
+
+def test_verify_skips_newly_collected_packs(tmp_path: Path) -> None:
+    """新采的例不进冻结基准：它们的时间戳每次采集都变，冻进去等于把重采变成回归失败。"""
+    build_pack(tmp_path, "base_healthy_01", [make_record(1)], origin_kind=OriginKind.COLLECTED)
+
+    report = verify(tmp_path, {})
+
+    assert report.ok
+    assert report.skipped == ("base_healthy_01",)
+    assert report.extra == ()
+    assert report.by_origin == {"collected": 1}
+
+
+def test_verify_still_flags_an_unlisted_migrated_pack(tmp_path: Path) -> None:
+    """迁移例不在基准里仍然是"多余"—— 迁移集的成员是固定的 132 个，多一个就是错。"""
+    build_pack(tmp_path, "case_a", [make_record(1)])
+    build_pack(tmp_path, "stray_migrated", [make_record(1)])
+
+    report = verify(tmp_path, {"case_a": fingerprint_pack(pack_paths(tmp_path, "case_a"))})
+
+    assert report.extra == ("stray_migrated",)
+    assert report.skipped == ()
 
 
 def test_verify_reports_a_content_diff(tmp_path: Path) -> None:

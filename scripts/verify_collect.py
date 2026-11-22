@@ -50,6 +50,9 @@ def _print_report(report) -> None:
             print(f"    {problem}")
     origins = "，".join(f"{kind} {count}" for kind, count in report.by_origin.items())
     tail = f"差异 {len(report.diffs)} 例，缺 {len(report.missing)} 例，多 {len(report.extra)} 例"
+    if report.skipped:
+        # 新采的例不冻结：时间戳每次采集都变，冻进基准等于把"重采一次"变成失败。
+        tail += f"，不参与比对 {len(report.skipped)} 例（collected）"
     print(
         f"\n[verify-collect] {len(report.matched)}/{report.expected_total} 一致"
         f"（{origins}）；{tail}"

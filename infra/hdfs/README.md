@@ -78,11 +78,45 @@ bash inject/dn_volume_restore.sh             # 删掉填盘文件并确认 df �
 - `replication=2` 时**单台 DN 挂掉不会产生 under-replicated 块**（另一份副本还在），
   所以 `DN_HEARTBEAT` 的指标证据是 `dead_datanodes=1`，不是副本不足。
 
+## 读写负载（`bin/workload.sh`）
+
+空载集群几乎不写日志 —— 没有负载的"正常样本"会是一段死水，P-B 挖不出模板，
+P-C 也没有可检索的上下文。所以采健康样本前必须先起负载：
+
+```bash
+docker exec -d alcp-nn /lab/bin/workload.sh     # 后台：每秒 put/cat/rm 一个小文件
+docker exec alcp-nn pkill -f /lab/bin/workload.sh
+```
+
+`scripts/collect_case.py` 会自己起停它（`--no-workload` 可关掉）。
+负载是**真读写**：`put` 触发 DN 的 `BlockReceiver` 日志、`cat` 触发读、
+`rm` 触发删除，三条路径都会在日志里留下可被采集到的痕迹 —— 不是往 `.log` 里
+`echo` 假行（那是自己伪造语料）。
+
+## 采一个病例（`scripts/collect_case.py`）
+
+```bash
+# 正常样本：从"现在"起跟随 5 分钟，指标 5s/30s 一起采
+python scripts/collect_case.py --case base_healthy_01 --minutes 5
+
+# 故障样本：基线 5 分钟 → 注入 10 分钟 → 恢复 5 分钟
+python scripts/collect_case.py --case inc_dnvol_01 --inject dn_volume \
+    --root-cause DN_VOLUME --minutes 5
+
+# 只打印注入剧本、不碰集群（管线照样跑）
+python scripts/collect_case.py --case inc_dnvol_01 --inject dn_volume --dry-run
+```
+
+三个开关对应三件必须做的事：`follow_until`（窗口内每 2 秒 drain，不是读一轮就收工）、
+`MetricsSession`（`docker stats` 5s / `dfsadmin -report`+`df` 30s 写进 `metrics.jsonl`）、
+`start_at_end`（起采前把每条流挪到 EOF，否则启动时 22KB 的 STARTUP_MSG classpath
+会被算进这 5 分钟）。
+
 ## 已知缺口
 
 - **`gc.log` 没接进采集链路**（O8）：要接得先加第三个解析档位 `jvm_gc`。
-- **指标还没接进采集循环**：`collect/metrics.py` 与 `scripts/snapshot_metrics.py` 已可用，
-  但 `collect.py` 还没有按 5s/30s 的节奏调用 `MetricsSession` —— 下一步（第 15 步）接。
 - **`df` 的读数只有 dn1 是"这块盘"**：dn2/dn3 的数据目录在 Docker 命名卷上，
   `df` 报的是宿主机磁盘（1.08TB），所以容量类判据要看 dn1。
+- **副本不足类判据用不上**：`replication=2` 下单台 DN 掉线不会产生 under-replicated
+  块，所以 `DN_HEARTBEAT` 只靠 `dead_datanodes` 与日志本身。
 

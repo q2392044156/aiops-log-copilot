@@ -11,7 +11,8 @@
 三条硬规则：
 
 1. **注入前必须 flush**。`flush()` 由采集器传进来，注入前调用；否则"注入之前系统是好的"
-   这句话在盘上找不到证据。
+   这句话在盘上找不到证据。故障段里**每秒也调一次** `flush()` —— 采集器传进来的这个
+   回调同时会采一拍指标，于是故障期间的指标是连续曲线，不是前后两个点。
 2. **restore 一定要跑**：apply 抛异常时也跑（`try/finally`）。留下一个没修复的集群，
    下一次采集就是在污染现场上采的。
 3. **`restored_ok` 必须是被验证出来的**，不是"我调用了 restore 所以它好了"。
@@ -309,8 +310,16 @@ class CommandInjection:
         failure: Exception | None = None
         try:
             self._run_all(plan.apply, phase="apply")
-            # ② 故障段。真实的 10 分钟就是在这里睡的，不是采完再补时间戳。
-            self._sleeper(plan.duration.total_seconds())
+            # ② 故障段。真实时长在这里等，不是"采完再补时间戳"。
+            #    等待期间每秒调一次 flush：采集编排传给这里的 flush 同时
+            #    会采一拍指标，于是 10 分钟的故障段里指标是一条连续曲线，
+            #    而不是"注入前后各一个点"。日志说 DN 死了、指标说
+            #    dead_datanodes 从 3 掉到 2，两边的时刻要对得上才行。
+            seconds = max(1, int(plan.duration.total_seconds()))
+            step = plan.duration.total_seconds() / seconds
+            for _ in range(seconds):
+                self._sleeper(step)
+                flush()
         except Exception as exc:  # noqa: BLE001 - 要保证 restore 一定被执行
             failure = exc
         ended = self._clock()

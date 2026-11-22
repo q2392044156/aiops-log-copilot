@@ -49,6 +49,7 @@ from logcopilot.collect.adapters.base import (
     CheckpointMismatch,
     StreamSpec,
     decode_line,
+    last_line_sha1,
     line_sha1,
 )
 from logcopilot.domain.case import Adapter, AdapterState
@@ -341,6 +342,35 @@ class DockerAdapter:
 
     def open(self, spec: StreamSpec) -> DockerReader:
         return DockerReader(spec, self._container, self._runner)
+
+    def prime(self) -> dict[str, AdapterState]:
+        """所有流跳到文件末尾（"从现在开始采"），口径与 file 侧一致。
+
+        做法：stat 拿 inode/size，	ail -c <size> 把整份文件读回来，再在
+        本地按**同一套规则**算 offset / line_no / tail —— 只认完整行。
+        读整个文件看着浪费，但 prime 一次采集只做一次，日志上限 60MB；
+        换成"只读尾巴"要多加两条与 file 侧不同的规则，两条路径迟早分叉。
+        """
+        states: dict[str, AdapterState] = {}
+        for spec in self.streams():
+            assert spec.path is not None
+            path = spec.path
+            meta = self._runner(["exec", self._container, "stat", "-c", "%i %s", path])
+            fields = meta.decode("utf-8", "replace").split()
+            if len(fields) < 2:
+                raise CheckpointMismatch(f"{self._container}:{path} 的 stat 输出看不懂: {meta!r}")
+            inode, size = int(fields[0]), int(fields[1])
+            data = b""
+            if size:
+                data = self._runner(["exec", self._container, "tail", "-c", str(size), path])
+            end = data.rfind(b"\n") + 1
+            states[spec.key] = AdapterState(
+                offset=end,
+                line_no=data[:end].count(b"\n"),
+                inode=inode,
+                tail_line_sha1=last_line_sha1(data[:end]),
+            )
+        return states
 
     def _list(self) -> tuple[str, ...]:
         out = self._runner(["exec", self._container, "ls", "-1", self._log_dir])

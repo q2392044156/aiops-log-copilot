@@ -120,6 +120,9 @@ class VerifyReport:
     matched: tuple[str, ...] = ()
     missing: tuple[str, ...] = ()
     extra: tuple[str, ...] = ()
+    #: 新采的例（`origin.kind=collected`）不参与冻结比对：它们的时间戳每次采集都变，
+    #: 冻进基准只会让"重采一次"变成回归失败。这里只计数，不算问题。
+    skipped: tuple[str, ...] = ()
     diffs: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     by_origin: Mapping[str, int] = field(default_factory=dict)
 
@@ -307,6 +310,7 @@ def verify(
     matched: list[str] = []
     missing: list[str] = []
     extra: list[str] = []
+    skipped: list[str] = []
     diffs: dict[str, tuple[str, ...]] = {}
     by_origin: dict[str, int] = {}
 
@@ -323,7 +327,12 @@ def verify(
             continue
         by_origin[found.origin] = by_origin.get(found.origin, 0) + 1
         if expected is None:
-            extra.append(case_id)
+            # 新采的例（collected）先天不可冻结：每个窗口的时间戳都不一样。
+            # 把它们算成"多余"会让"采完一例就跑 verify"永远红。
+            if found.origin != "migrated":
+                skipped.append(case_id)
+            else:
+                extra.append(case_id)
             continue
         problems = compare(found, expected)
         if problems:
@@ -341,6 +350,7 @@ def verify(
         matched=tuple(matched),
         missing=tuple(sorted(missing)),
         extra=tuple(sorted(extra)),
+        skipped=tuple(sorted(skipped)),
         diffs=diffs,
         by_origin=dict(sorted(by_origin.items())),
     )

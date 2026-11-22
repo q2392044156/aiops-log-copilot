@@ -45,6 +45,7 @@ from logcopilot.collect.adapters.base import (
     CheckpointMismatch,
     StreamSpec,
     decode_line,
+    last_line_sha1,
     line_sha1,
 )
 from logcopilot.domain.case import Adapter, AdapterState
@@ -282,6 +283,32 @@ class FileAdapter:
 
     def open(self, spec: StreamSpec) -> FileReader:
         return FileReader(spec)
+
+    def prime(self) -> dict[str, AdapterState]:
+        """所有流都跳到文件末尾（"从现在开始采"）。
+
+        `line_no` 填**文件里已有的物理行数**：它不是"这个组件已经采了多少条"，
+        而是"这个组件的编号发到哪儿了"。两者在"从头采"时相同；在"从末尾采"
+        时用物理行数才不会与后面续采的编号撞车。
+
+        `tail_line_sha1` 填最后一行的 sha1：续采时 `FileReader` 会用它校验
+        "offset 之前那一行到底是不是我以为的那一行"。
+        """
+        states: dict[str, AdapterState] = {}
+        for spec in self.streams():
+            assert spec.path is not None  # `streams()` 一定会填
+            path = Path(spec.path)
+            data = path.read_bytes()
+            # 只认**完整行**：末尾半行不算消费过，offset 停在最后一个 `\n` 之后。
+            # 否则续采时 `_tail_before` 会拿到半行，sha1 必然对不上。
+            end = data.rfind(b"\n") + 1
+            states[spec.key] = AdapterState(
+                offset=end,
+                line_no=data[:end].count(b"\n"),
+                inode=file_inode(path),
+                tail_line_sha1=last_line_sha1(data[:end]),
+            )
+        return states
 
 
 def file_inode(path: Path) -> int:
