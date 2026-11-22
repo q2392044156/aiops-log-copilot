@@ -50,8 +50,39 @@ docker compose down -v        # 连数据卷一起删（NN 的元数据也没了
 - dn1 重启后数据盘清空，故障可重复，不留后遗症；
 - dn2/dn3 正常，保证 `replication=2` 的副本能正常落下来。
 
+## 故障注入
+
+`inject/` 下每个脚本都是一次可逆的注入，全部支持空跑：
+
+```bash
+DRY_RUN=1 bash inject/dn_volume_fill.sh      # 只打印要做什么
+bash inject/dn_volume_fill.sh                # 真写满 dn1 的 128MB 数据盘
+bash inject/dn_volume_restore.sh             # 删掉填盘文件并确认 df 能读
+```
+
+| 根因 | 脚本 | 做了什么 |
+|---|---|---|
+| `DN_VOLUME` | `dn_volume_fill.sh` / `dn_volume_restore.sh` | 往 dn1 的 tmpfs 里 `dd` 200MB，必然 ENOSPC |
+| `DN_HEARTBEAT` | `dn_heartbeat_pause.sh` / `dn_heartbeat_resume.sh` | `docker pause`（SIGSTOP）：进程在、心跳停 |
+| `DN_HEARTBEAT` | `dn_heartbeat_stop.sh` / `dn_heartbeat_start.sh` | `docker stop`：进程没了，重启重新注册块 |
+| `NN_SAFE_MODE` | `nn_safemode_enter.sh` / `nn_safemode_leave.sh` | `dfsadmin -safemode enter/leave` |
+| `NETWORK_CONNECTIVITY` | `net_disconnect.sh` / `net_connect.sh` | `docker network disconnect/connect`（不需要 NET_ADMIN） |
+
+**采集链路不调 bash**：`collect/inject.py` 自己拼同样的 docker 命令（`InjectionPlan`）。
+这些脚本是给人在终端里复现用的，两边命令必须一致，改了这边记得改那边。
+
+实测延迟（`recheck-interval=2000` + `heartbeat.interval=2`）：
+
+- commit 之后 pause 一台 DN，**约 30 秒**后 `dfsadmin -report` 才把它算成 dead；
+- unpause 之后 **8 秒内**回到 `Live datanodes (3)`；
+- `replication=2` 时**单台 DN 挂掉不会产生 under-replicated 块**（另一份副本还在），
+  所以 `DN_HEARTBEAT` 的指标证据是 `dead_datanodes=1`，不是副本不足。
+
 ## 已知缺口
 
 - **`gc.log` 没接进采集链路**（O8）：要接得先加第三个解析档位 `jvm_gc`。
-- **`metrics.jsonl` 还是空文件**：`docker stats`（5s）与 `dfsadmin -report` + `df -h`（30s）尚未实现。
-- **注入脚本**：`inject/` 目前只有占位，第 14 步补齐 4 族（卷满 / 心跳 / 安全模式 / 网络）。
+- **指标还没接进采集循环**：`collect/metrics.py` 与 `scripts/snapshot_metrics.py` 已可用，
+  但 `collect.py` 还没有按 5s/30s 的节奏调用 `MetricsSession` —— 下一步（第 15 步）接。
+- **`df` 的读数只有 dn1 是"这块盘"**：dn2/dn3 的数据目录在 Docker 命名卷上，
+  `df` 报的是宿主机磁盘（1.08TB），所以容量类判据要看 dn1。
+
