@@ -623,8 +623,26 @@ def audit(paths: CasePackPaths) -> list[str]:
 def audit_levels(paths: CasePackPaths, manifest: CaseManifest, labels: Labels) -> list[str]:
     """V5 / V6：正常例零 ERROR、故障例有预期证据。
 
-    这两条是"采到了没有"的判据 —— 一个 pack 结构再合法，如果故障例里一条
-    ERROR 都没有，那它只能证明环境能跑，不能进评测集。
+    这两条是"采到了没有"的判据 —— 一个 pack 结构再合法，如果故障例里连一条
+    非 INFO 记录都没有，那它只能证明环境能跑，不能进评测集。
+
+    ## V6 为什么不是"ERROR >= 1"
+
+    旧语料 132 例里，**只有 DN_VOLUME 一族有 ERROR**（28/28），心跳 37 例、
+    网络 21 例、安全模式 46 例全是 WARN —— 而且 DN_VOLUME 的 ERROR 来自
+    DN 启动失败（`DiskChecker$DiskErrorException`），不是"盘满"本身。
+    我们自己在真实集群上采的第一个故障例（dn1 盘写满）也是 ERROR=0：
+    HDFS 绝大多数故障就是 WARN 级的，把"ERROR>=1"当红线，会逼人反填 expect。
+
+    所以 V6 改成三条**正向断言**：
+
+    1. 门槛不能全 0（`min_error_lines + min_warn_lines >= 1`）—— 否则这条例
+       什么都没证明，人也什么都没标；
+    2. 实测 ERROR / WARN 分别不低于 expect 的门槛；
+    3. `expect.error_components` 里的每个组件，都真的出现过非 INFO 记录。
+
+    **刻意不做反向断言**（"expect 之外的组件不许报错"）：故障会级联，
+    上游出事、下游跟着 WARN 是正常的；拿反向断言去卡，只会让真实样本过不了。
     """
     problems: list[str] = []
     error_count = manifest.counters.by_level.get(str(LogLevel.ERROR), 0)
@@ -647,6 +665,13 @@ def audit_levels(paths: CasePackPaths, manifest: CaseManifest, labels: Labels) -
         return problems
 
     expect = labels.expect
+    threshold = expect.min_error_lines + expect.min_warn_lines
+    if threshold < 1:
+        problems.append(
+            "levels: expect 的门槛全是 0 —— 这条故障例没有任何证据要求，"
+            "等于没标注（故障可能根本没被采到）"
+        )
+
     if error_count < expect.min_error_lines:
         problems.append(
             f"levels: ERROR 只有 {error_count} 条，expect 要求 >= {expect.min_error_lines}"
@@ -657,12 +682,14 @@ def audit_levels(paths: CasePackPaths, manifest: CaseManifest, labels: Labels) -
             f"levels: WARN 只有 {warn_count} 条，expect 要求 >= {expect.min_warn_lines}"
         )
 
-    actual = {record.component for record in read_logs(paths) if record.level is LogLevel.ERROR}
+    # 正向断言：说会出证据的组件，必须真的出过非 INFO 记录。
+    noisy = {record.component for record in read_logs(paths) if record.level is not LogLevel.INFO}
     expected = set(expect.error_components)
-    if expected and not expected <= actual:
-        problems.append(f"levels: expect 里说会报 ERROR 的 {sorted(expected - actual)} 没有出现")
-    unexpected = actual - expected
-    if expected and unexpected:
-        problems.append(f"levels: 出现了 expect 之外的 ERROR 组件 {sorted(unexpected)}")
+    if not expected:
+        problems.append("levels: expect.error_components 为空 —— 故障例必须有'哪个组件会出证据'")
+    else:
+        missing = expected - noisy
+        if missing:
+            problems.append(f"levels: expect 说会出非 INFO 记录的 {sorted(missing)} 一条都没有")
 
     return problems

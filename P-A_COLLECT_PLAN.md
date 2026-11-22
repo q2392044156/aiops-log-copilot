@@ -70,18 +70,28 @@ infra/hdfs/compose.yaml  (project name: logcopilot-hdfs)
 | 用户 | `user: "0:0"` | 否则容器内 `dd` 写不进数据目录、`hdfs` 命令也没有权限 |
 | 时区 | **`TZ=UTC`（推荐，见 §10 O3）** | 日志里是 UTC，宿主机是 +08:00——统一成 UTC，A2 就不用猜 |
 | 日志落点 | 容器内 `/opt/hadoop/logs/`，同时 **bind mount** 到 `runtime/hdfs-logs/<container>/` | 让 `file` adapter 与 `docker` adapter 读同一份数据 → 两条路径产出必须逐字节相同（这本身是一个测试） |
-| 数据盘 | dn1 用 `tmpfs size=128m`，dn2/dn3 用 volume | `dd 256MB` 必然写爆 dn1，注入稳定且不伤宿主磁盘 |
+| 数据盘 | dn1 用 `tmpfs size=2g`，dn2/dn3 用 volume | `dd 4GB` 必然写爆 dn1，注入稳定且不伤宿主磁盘。**128m 不够**：20 分钟负载自己就能写满它，故障不可控（见 §2.5） |
 | 内存 | 4 容器 × 512m heap ≈ 2.5–3.5GB | 本机足够 |
 | 端口 | 9870 / 9000（仅 NN） | 宿主机不暴露 DN 端口，减少干扰 |
 | 启动 | `bin/start-namenode.sh` / `bin/start-datanode.sh`（`hdfs namenode -format` 只在首次） | 脚本化，不手工敲 |
 
-**环境即代码**：`infra/hdfs/{compose.yaml,conf/core-site.xml,conf/hdfs-site.xml,bin/,inject/}` 全部进 git；`conf` 只改三处（`fs.defaultFS`、`dfs.replication=2`、`dfs.datanode.data.dir`），其余用默认。
+**环境即代码**：`infra/hdfs/{compose.yaml,conf/core-site.xml,conf/hdfs-site.xml,bin/,inject/}` 全部进 git；`conf` 只改四处（`fs.defaultFS`、`dfs.replication=3`、`dfs.blocksize=32m`、`dfs.datanode.data.dir`），其余用默认。
 
-### 2.3 为什么 `dfs.replication=2`（不是默认 3）
+### 2.3 为什么 `dfs.replication=3` + `dfs.blocksize=32m`（v0.4 改）
 
-3 个 DN、副本 3 → 每个块三份，**任何一台 DN 挂掉都不会产生"副本不足"**，`DN_HEARTBEAT` 的现象会被掩盖。副本 2 → 3DN 里挂 1 台就立刻出现 `Under-replicated blocks`，现象更"响"、更好采。代价是 3DN 也只能容忍 1 台故障，但采集只需要"能看见"。
+**block 太大，dn1 就永远不接块。** NameNode 选副本时第一道门槛是 `available >= blocksize`：dn1 的盘只有几百 MB，默认 128MB 的块它放不下，于是 `dfs.replication=2` 时 NN 会把两块都放 dn2/dn3 —— dn1 的 `DirectoryScanner` 常年 `Total blocks: 0`，把它的盘写满对集群**毫无影响**，日志里一行都不会有（2026-11-22 实采确认：20 分钟、原样注入、dn1 记录 0 条）。这等于"靶子不在射程内"。
 
-### 2.4 环境自检（起集群后必须跑）
+改成 `blocksize=32m` + `replication=3` 之后，每个块都要落三台，dn1 必然接块（同一环境重采：dn1 记录 1127 条，盘占用从 1% 涨到 79%），盘满才会真的影响写管道与副本放置。
+
+副本 3 在"挂一台"上的表现也比副本 2 更清楚：3 副本 1 台全丢 → 2 副本 < 3，NN 立刻报 `Under-replicated blocks: N`；同时 Live DN 从 3 掉到 2。原 v0.1 那句话（"副本 3 不会产生副本不足"）是写反了。
+
+### 2.4 dn1 的盘到底多大（v0.4 改）
+
+`128m` 太小、`512m` 也不够：workload 以约 40–70 MB/分钟的速度往 HDFS 写，20 分钟窗口光正常负载就能把 512m 写满 —— 于是"故障段"其实在 baseline 里就开始了，谁也没法证明盘是被注入写满的。现在取 `2g`，正常负载 20 分钟约占 40–60%，`dd` 用 4096MB 强制撞 ENOSPC。
+
+配套要求（第 14 步起已实现）：**`dd` 的 `count_mb` 必须大于盘容量**，否则 `dd` 成功退出、盘却没满，而 `expect_ok=False` 会把这种"什么都没发生"吞掉。第一次实采就是这么白白跑了 20 分钟：盘 512m、`count=200`，`df` 从 1% 到 39% 就停了。
+
+### 2.5 环境自检（起集群后必须跑）
 
 ```powershell
 docker compose -f infra/hdfs/compose.yaml up -d
@@ -338,7 +348,7 @@ data/cases/<case_id>/
 | V3 | 续采不重不漏 | 采 → `Ctrl-C` → `--resume` | 合并后行数 == 一次性采满的行数；`id` 集合完全相同（无重复、无遗漏） |
 | V4 | 两条读路径一致 | 同窗口分别用 `file` 与 `docker --path` 采 | `canonical_sha256` 相等（canonical 投影已排除 `source`，见 §6.3） |
 | V5 | 正常例零 ERROR | `make pack-lint CASE=base_healthy_01 CHECK=levels` | `by_level.ERROR == 0` |
-| V6 | 故障例有证据（**只对 `origin=collected` 的新采例成立**） | `make pack-lint CASE=inc_dnvol_01 CHECK=levels`（3 个 `inc_*` 各跑一次） | `by_level.ERROR >= 1` 且出现在 `expect.error_components` 里 |
+| V6 | 故障例有证据（**只对 `origin=collected` 的新采例成立**） | `make pack-lint CASE=inc_dnvol_01 CHECK=levels`（3 个 `inc_*` 各跑一次） | `min_error_lines + min_warn_lines >= 1`；实测 `ERROR`/`WARN` 各自不低于门槛；`expect.error_components` 非空且其中每个组件都真的出现过**非 INFO**（WARN 或 ERROR）记录。**不做反向断言**：expect 之外的组件跟着报错不算失败 |
 | V7 | 可逆 | 每个 inject 脚本执行 `_restore.sh` 后跑 | `dfsadmin -report` 的 Live DN 数回到 3；`safemode get` 回 OFF |
 | V8 | 脱敏有账 | 任意样例 | `counters.redacted` 四类字段齐全，`ip`/`path` 两类 > 0 且与 `grep` 抽查一致；旧数据命中已有占位符时为 0 且**不算失败** |
 | V9 | 旧两种语法都能解析 | `pytest tests/collect/ -k lab` | 语法 A / 语法 B / 带前缀续行 三类 fixture 全部 `ok` 或 `partial`，`failed == 0` |
@@ -346,6 +356,10 @@ data/cases/<case_id>/
 > **V2 的基准从哪来（v0.1 漏了）**：旧 132 例的 `evidence/logs/*.log` 实测只有 2–993 行，而 `data/processed/*/logs.parquet` 是旧项目的全量语料、**不是这 132 例的切片**。所以"全等"不能拿新解析器自己当参照。现在的做法是两层：①`store/verify.py` 用**独立第二实现**只读 `logs.jsonl` 文本重算（不 import `domain.log`、不调 `casepack` 的计算函数），与生产者只共享契约；②把通过时的指纹冻结进 `tests/fixtures/verify/baseline.json`，此后任何一例的任何数字变化都算失败，必须显式 `--update-baseline` 并让基准 diff 出现在提交里。V9 是 V2 的前置检查。
 >
 > **V6 为什么只对新采例成立**：迁移的 132 例里 `ERROR` 只出现在 `DN_VOLUME`（28/28 例），心跳 37 例、网络 21 例、安全模式 46 例**一行 ERROR 都没有**（P-E 的"漏检"口径必须知道这件事）。拿旧数据卡 V6 只会逼人反填 `expect`，所以 `audit_levels()` 对 `origin=migrated` 直接放行；V6 的证据只认 `origin=collected`。
+
+> **V6 v0.4：从"ERROR >= 1"改成"非 INFO >= 1"**。2026-11-22 在真实集群上采第一个 `DN_VOLUME` 故障例（把 dn1 的 128MB tmpfs 写满）时，`ERROR` 是 **0** —— HDFS 盘满的日志表现就是持续 WARN（`Not able to place enough replicas` 之类），ERROR 只在 DN **启动失败**时出现（旧语料 28 例的 ERROR 全是 `DiskChecker$DiskErrorException` / `Failed to acquire lock`，不是"盘满"本身）。把"ERROR >= 1"当红线，意味着四族里只有"能造出启动失败"的那一两个变体才合格，其余全被判死；而人能"凭实测填"的 expect 会因此被迫往上抬，校验就变成了自证。
+>
+> 现在的三条是**正向断言**：门槛不全 0、实测 ERROR/WARN 各自达标、`expect.error_components` 里点名的组件真的出过非 INFO 记录。**刻意不做反向断言**（"expect 之外的组件不许报错"）：故障会级联，上游出事、下游跟着 WARN 是正常的；拿反向去卡只会让真实样本过不了。`expect.error_components` 的语义也随之放宽成"哪个组件会出现非 INFO 记录"，字段名沿用是为了不动 schema。
 
 ---
 
@@ -436,6 +450,7 @@ data/cases/<case_id>/
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.4 | 2026-11-22 | 实采回填：§2.2/§2.3/§2.4 把 dn1 数据盘从 `128m` 改成 `2g`，改用 `dfs.blocksize=32m` + `dfs.replication=3`（块比盘大时 dn1 永远不接块，盘满无痕）；V6 从"ERROR>=1"改成"非 INFO>=1"（真实故障的日志表现几乎都是 WARN，ERROR 只在 DN 启动失败时出现），`audit_levels` 改为三条正向断言、不做反向断言；`expect` 门槛允许为 0 但和必须 >=1 |
 | v0.3 | 2026-11-22 | 实现回填（第 9 / 11 / 12 步）：§6.1 docker adapter 改成"把容器当远端文件系统、只用 `tail -c` 一套 offset 语义"，**不实现 `docker logs --since`**，stdout 改由 §2 的 `tee` 落盘（O7 闭环）。V6 收紧为"只对 `origin=collected` 成立"（迁移的 132 例里 104 例根本没有 ERROR），并补一段说明。V2 改成"独立第二实现 + `tests/fixtures/verify/baseline.json` 冻结基准"，差异白名单取消（A-R4 改为重新冻结基准并在提交里露 diff）。§8.2 M1.4 补 `store/verify.py` 与基准文件；A-R1 标已落地 |
 | v0.2 | 2026-11-22 | 对齐总计划 v1.0：引用改指 §4.1 / §5 / §7 / §8.2，路径补 `apps/backend/src/logcopilot/` 前缀，补 M0.x 前置表。CasePack 读写归 `store/casepack.py`（并入原 `collect/pack.py` 与 `collect/manifest.py`）。`LogRecord` 定死 10 字段：`id = {component}:{line_no:05d}`、`ts` 用 `+00:00`、新增 `logger`、`raw` 仅非 ok 出现。canonical 拆 `hdfs_log4j` / `lab` 两个 profile，按实测语法 A/B 与"续行也带前缀"重写判据。redact 要求对已有占位符幂等。`canonical_sha256` 只覆盖 canonical 投影（排除 `source`/`raw`），排序键改 `(ts, id)`，新增 `finalize` 阶段。`pipeline_version` / `redact_policy.version` / `canonical_profile` 明确不入任何哈希。V2 改用独立 oracle + 冻结 fixture，新增 V9（两种旧语法），命令改 `CASE=`/`CHECK=`。`window.phases` 与 `fault_injection` 可空并给出反推规则；O6 标记闭环 |
 | v0.1 | 2026-11-22 | 首版。定下：只采 HDFS 生态（NN/DN/audit/GC/stdout + 指标）；docker compose 1NN+3DN、`TZ=UTC`、`dfs.replication=2`；采集端不过滤 level、FATAL 不伪造；三段窗口（baseline/fault/recovery）；S1 只采 3 例；指纹拆成 `input_fingerprint` + `canonical_sha256` |

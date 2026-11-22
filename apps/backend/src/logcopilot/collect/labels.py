@@ -48,11 +48,18 @@ class Measured:
     def warn_lines(self) -> int:
         return self.by_level.get(LogLevel.WARN.value, 0)
 
+    @property
+    def noisy_components(self) -> tuple[str, ...]:
+        """出现过非 INFO（WARN 或 ERROR）记录的组件。"""
+        return self.error_components
+
     def suggest_expect(self) -> Expect:
         """按实测值给出门槛。
 
-        `min_error_lines` 用实测值 —— 不是"至少 1 条"，而是"上次采到几条，
-        这次至少也得有这么多"。少了就是采漏了，不该悄悄放行。
+        门槛用实测值，不是"至少 1 条"：上次采到几条，这次至少也得有这么多，
+        少了就是采漏了，不该悄悄放行。**指标全 0 的时候也不凑数** ——
+        一个日志里看不出故障的故障例，就应该被 V6 挡下来，而不是被门槛
+        抬过去（`inc_dnvol_01` 第一次采集就是这种情况：盘满只在指标里有痕迹）。
         """
         return Expect(
             min_error_lines=self.error_lines,
@@ -62,7 +69,11 @@ class Measured:
 
 
 def measure(paths: CasePackPaths) -> Measured:
-    """数一遍盘上的记录：level 分布 + ERROR 出现在哪些组件。"""
+    """数一遍盘上的记录：level 分布 + 非 INFO 记录出现在哪些组件。
+
+    数的是 WARN **和** ERROR 的组件，不只是 ERROR：V6 已经不要求故障必有
+    ERROR（旧语料 104/132 例就没有），证据往往是 WARN。
+    """
     if not paths.logs.is_file():
         raise LabelError(f"{paths.logs} 不存在 —— 这不是一个采完的 pack")
     by_level: dict[str, int] = {}
@@ -77,7 +88,7 @@ def measure(paths: CasePackPaths) -> Measured:
             level = str(row["level"])
             by_level[level] = by_level.get(level, 0) + 1
             lines += 1
-            if level == LogLevel.ERROR.value:
+            if level != LogLevel.INFO.value:
                 errors.add(str(row["component"]))
     return Measured(lines=lines, by_level=by_level, error_components=tuple(sorted(errors)))
 

@@ -2,7 +2,7 @@
 <!--
   HDFS 侧参数。每一条都直接决定我们能造出什么故障、以及日志里能不能看到：
 
-  replication=2      → 只有 3 个 DN 时，挂掉 1 台就立刻 Under-replicated（BLOCK_REPLICATION 的前置）
+  replication=3 + blocksize=32m → 块小到 dn1 的 512MB 盘也能接（默认 128MB 块 + 128MB 盘 = 一块都放不下）
   du.reserved=0      → 数据盘写满马上报 DiskOutOfSpaceException，不需要等预留空间
   heartbeat=2s
   recheck-interval=2000 → 判 dead ≈ 2*2s + 10*2s = 24 秒（默认值是 630 秒，10 分钟的故障窗里等不到）
@@ -13,7 +13,9 @@
                           不是容器 IP —— component 归一化靠的就是这个
 -->
 <configuration>
-  <property><name>dfs.replication</name><value>2</value></property>
+  <property><name>dfs.replication</name><value>3</value></property>
+  <!-- 32MB 块：dn1 的盘只有 512MB，默认 128MB 块会让 NN 判定它放不下而永不选它（dfs.namenode.replication.considerLoad 之外的第一道门槛是 available >= blocksize） -->
+  <property><name>dfs.blocksize</name><value>33554432</value></property>
   <property><name>dfs.namenode.name.dir</name><value>/tmp/hadoop-root/dfs/name</value></property>
   <property><name>dfs.datanode.data.dir</name><value>/tmp/hadoop-root/dfs/data</value></property>
   <property><name>dfs.permissions.enabled</name><value>false</value></property>

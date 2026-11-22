@@ -8,7 +8,7 @@
 #      新环境要的是「主日志 / 审计 / GC 各一个文件」+ stdout 只留启动脚本的几行。
 #   4. 换掉了 project / 容器 / 主机名（aiops-lab-* → alcp-*）—— 旧集群还在，名字不能撞。
 #
-# dn1 的数据盘是 tmpfs 128m，配合 hdfs-site.xml 的 du.reserved=0，是造 DN_VOLUME 最干净的
+# dn1 的数据盘是 tmpfs 2g，配合 hdfs-site.xml 的 du.reserved=0，是造 DN_VOLUME 最干净的
 # 手法：dd 写满立刻 DiskOutOfSpaceException + volume failure，且 dn1 重启即恢复。
 #
 # 注意：volumes 在四个 service 里各写一遍。YAML 的锚点只能合并映射、不能合并列表，
@@ -81,7 +81,7 @@ services:
       - ../../runtime/hdfs-logs/dn1:/opt/hadoop/logs
     # 故意不挂数据卷：数据盘是内存盘，容器重启数据即丢，故障可重复
     tmpfs:
-      - /tmp/hadoop-root/dfs/data:size=128m
+      - /tmp/hadoop-root/dfs/data:size=2g
 
   dn2:
     <<: *hadoop

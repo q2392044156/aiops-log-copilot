@@ -16,7 +16,7 @@ DN3="${DN3:-alcp-dn3}"
 NETWORK="${NETWORK:-aiops-log-copilot_hdfs}"
 DN_DATA_DIR="${DN_DATA_DIR:-/tmp/hadoop-root/dfs/data}"
 FILL_NAME="${FILL_NAME:-lab.fill}"
-FILL_MB="${FILL_MB:-200}"
+FILL_MB="${FILL_MB:-4096}"
 
 run() {
   if [ "$DRY_RUN" = "1" ]; then

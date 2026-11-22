@@ -48,7 +48,14 @@ from logcopilot.collect.metrics import (  # noqa: E402
     docker_runner,
 )
 from logcopilot.collect.redact import PatternRedactor  # noqa: E402
-from logcopilot.domain.case import CanonicalProfile, Labels, RootCause, Window  # noqa: E402
+from logcopilot.domain.case import (  # noqa: E402
+    CanonicalProfile,
+    Labels,
+    Phase,
+    PhaseWindow,
+    RootCause,
+    Window,
+)
 
 COMPONENTS = ("nn", "dn1", "dn2", "dn3")
 CONTAINERS = {component: f"alcp-{component}" for component in COMPONENTS}
@@ -151,11 +158,20 @@ def main(argv: list[str] | None = None) -> int:
 
     now = datetime.now(UTC).replace(microsecond=0)
     baseline = timedelta(minutes=args.minutes)
+    since = now
     if args.inject is None:
-        since, until = now, now + baseline
+        baseline_end = now + baseline
+        until = baseline_end
+        phases = (PhaseWindow(Phase.BASELINE, since, until),)
     else:
-        since = now
-        until = now + baseline + timedelta(minutes=args.fault_minutes + args.recovery_minutes)
+        baseline_end = now + baseline
+        fault_end = baseline_end + timedelta(minutes=args.fault_minutes)
+        until = fault_end + timedelta(minutes=args.recovery_minutes)
+        phases = (
+            PhaseWindow(Phase.BASELINE, since, baseline_end),
+            PhaseWindow(Phase.FAULT, baseline_end, fault_end),
+            PhaseWindow(Phase.RECOVERY, fault_end, until),
+        )
 
     # 正常例 `root_cause=None`；`RootCause(...)` 会拒绝闭集外的字符串（大写拼错也别放过）。
     labels = Labels(
@@ -168,7 +184,11 @@ def main(argv: list[str] | None = None) -> int:
         root,
         case_id=args.case,
         profile=CanonicalProfile.HDFS_LOG4J,
-        window=Window(since=since, until=until),
+        # 三段窗口必须显式声明：`Collector` 拿 `window.phases[fault].since` 当
+        # 注入的触发点。少了它，`window.phase(FAULT)` 返回 None，注入会退化成
+        # "采满整个窗口之后再动手" —— 故障段整段落在窗口之外（2026-11-22 实采
+        # 踩到：`fault_injection.started` 比 `window.until` 还晚 1 秒）。
+        window=Window(since=since, until=until, phases=phases),
         labels=labels,
         sources=sources,
         redactor=PatternRedactor(),

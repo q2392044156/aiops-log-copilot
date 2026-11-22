@@ -23,7 +23,16 @@ import pytest
 from logcopilot.collect.adapters.file import FileAdapter, FileStream
 from logcopilot.collect.collect import CollectError, CollectMode, Collector, SourceSpec
 from logcopilot.collect.metrics import MetricPoint, MetricsSession
-from logcopilot.domain.case import Adapter, CanonicalProfile, Labels, Window
+from logcopilot.domain.case import (
+    Adapter,
+    CanonicalProfile,
+    FaultInjection,
+    Labels,
+    Phase,
+    PhaseWindow,
+    RootCause,
+    Window,
+)
 from logcopilot.domain.log import ParseStatus
 
 T0 = datetime(2026, 11, 22, 10, 0, 0, tzinfo=UTC)
@@ -289,7 +298,7 @@ def test_inject_keeps_collecting_metrics_during_the_fault(tmp_path: Path) -> Non
     collector = _collector(root, clock, until=T0 + timedelta(minutes=1), metrics=session)
     report = collector.collect(
         mode=CollectMode.INJECT,
-        hook=hook,
+            hook=hook,
         follow_until=T0 + timedelta(minutes=1),
         poll_interval=2.0,
         sleeper=_sleep_advancing(clock, path),
@@ -433,3 +442,57 @@ def test_records_written_after_the_window_are_dropped(tmp_path: Path) -> None:
     last_ts = report.manifest.checkpoint.last_ts
     assert last_ts is not None and last_ts <= until
     assert all(row["message"] != "窗口外" for row in _records(tmp_path / "logs" / "cases"))
+
+
+def test_inject_starts_only_at_the_fault_phase_boundary(tmp_path: Path) -> None:
+    """注入不能落在 baseline 里 —— 必须等 fault 段的起点。
+
+    这条是实采踩出来的：第一版 hook 在采集一开始就被调用，于是"写满数据盘"
+    发生在 baseline 段，5 分钟 baseline 里全程是坏盘、恢复段也全程是坏盘，
+    快照里根本没有"由好变坏"的转折点。
+    """
+    path = _log(tmp_path / "logs", 1)
+    clock = FakeClock(T0)
+    fault_since = T0 + timedelta(seconds=6)
+    until = T0 + timedelta(seconds=12)
+    adapter = FileAdapter(
+        tmp_path / "logs", (FileStream("dn1", "main", 0, "dn1/hadoop-hdfs-datanode-*.log"),)
+    )
+    collector = Collector(
+        tmp_path / "cases",
+        case_id="inc_dnvol_01",
+        profile=CanonicalProfile.LAB,
+        window=Window(
+            since=T0,
+            until=until,
+            phases=(
+                PhaseWindow(Phase.BASELINE, T0, fault_since),
+                PhaseWindow(Phase.FAULT, fault_since, until),
+            ),
+        ),
+        labels=Labels(case_id="inc_dnvol_01", root_cause=RootCause.DN_VOLUME),
+        sources=(SourceSpec(component="dn1", adapter=adapter, ref="test"),),
+        clock=clock,
+    )
+
+    seen: list[datetime] = []
+
+    class Hook:
+        """最小 `InjectionHook`：只记下"我被调用的那一刻"。"""
+
+        name = "test"
+
+        def __call__(self, flush: Any) -> FaultInjection:
+            seen.append(clock())
+            now = clock()
+            return FaultInjection(script="test", started=now, ended=now, restored=now)
+
+    collector.collect(
+        mode=CollectMode.INJECT,
+        hook=Hook(),
+        follow_until=until,
+        poll_interval=1.0,
+        sleeper=_sleep_advancing(clock, path),
+    )
+    assert seen, "hook 必须被调用"
+    assert seen[0] >= fault_since, f"注入发生在 {seen[0]}，早于 fault 段起点 {fault_since}"

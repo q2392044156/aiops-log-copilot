@@ -78,6 +78,7 @@ from logcopilot.domain.case import (
     Labels,
     Origin,
     OriginKind,
+    Phase,
     RedactPolicy,
     SourceRef,
     Window,
@@ -424,6 +425,11 @@ class Collector:
         def progress() -> None:
             """采集进度的安全点：把已采的行与已采的指标都落盘。
 
+            注意两个写者都要 flush：`MetricsWriter.append` 只写缓冲，
+            不 flush 的话整个故障段的指标都躺在内存里 —— 采集器一崩，
+            "指标说 DN 死了"这条证据就跟着没了（实采时踩到过：
+            20 分钟跑完 `metrics.jsonl` 还是 0 字节）。
+
             `inject` 模式的自定义 hook 在故障段里每秒调它一次 —— 所以故障
             持续 10 分钟时，指标不是"注入前后各一个点"，而是 600 秒的连续
             曲线。这正是"日志说 DN 死了、指标说 dead_datanodes 从 3 掉到 2"
@@ -432,17 +438,24 @@ class Collector:
             writer.flush()
             self._sample_metrics(metrics_writer)
 
+        # 注入段的起点 = 窗口里声明的 fault 段起点。没有声明就退化成"立刻注入"。
+        fault = self._window.phase(Phase.FAULT) if mode is CollectMode.INJECT else None
+        baseline_until = fault.since if fault is not None else follow_until
+
         try:
-            if follow_until is None or mode is CollectMode.INJECT:
+            if follow_until is None or baseline_until is None:
                 self._drain_all(paths, writer, acc, check_window=check_window)
                 self._sample_metrics(metrics_writer)
             else:
+                # 先把 baseline 段采满，再动手注入。少了这一轮，注入会落在
+                # baseline 里 —— 事后谁也没法证明"注入之前系统是好的"，
+                # 而且故障窗口里根本没有"由好变坏"的转折点。
                 self._follow(
                     paths,
                     writer,
                     acc,
                     metrics_writer,
-                    until=follow_until,
+                    until=baseline_until,
                     poll_interval=poll_interval,
                     sleeper=sleeper,
                     check_window=check_window,
@@ -652,6 +665,9 @@ class Collector:
             # `MetricsWriter.append` 吃的是可迭代 —— 一拍可能同时出好几条
             # （一次 hdfs_report 会带 report + safemode 两个点）。
             metrics_writer.append(points)
+            # 每拍都落盘：采集器随时可能被杀掉（Ctrl-C、OOM、容器重启），
+            # 缓冲里的指标是"已经采到但没人看得见"的假数据。
+            metrics_writer.flush()
 
     # ------------------------------------------------------------ 内部：状态
 

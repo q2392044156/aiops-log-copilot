@@ -509,7 +509,8 @@ def test_audit_levels_fault_case_without_expect_is_an_error(tmp_path: Path) -> N
     assert any("expect" in problem for problem in problems)
 
 
-def test_audit_levels_detects_unexpected_error_component(tmp_path: Path) -> None:
+def test_audit_levels_tolerates_cascade_noise_from_other_components(tmp_path: Path) -> None:
+    """故障会级联：expect 之外的组件跟着报错，不算失败。"""
     records = [
         make_record(1, T0, level=LogLevel.ERROR, component="dn1"),
         make_record(2, T0 + timedelta(seconds=1), level=LogLevel.ERROR, component="dn2"),
@@ -521,5 +522,60 @@ def test_audit_levels_detects_unexpected_error_component(tmp_path: Path) -> None
     )
     manifest = build_pack(tmp_path, records=records, labels=labels)
     paths = pack_paths(tmp_path, "inc_dnvol_01")
+    assert audit_levels(paths, manifest, read_labels(paths)) == []
+
+
+def test_audit_levels_rejects_all_zero_thresholds(tmp_path: Path) -> None:
+    """门槛全是 0 = 什么都没要求，等于没标注。"""
+    records = [make_record(1, T0, level=LogLevel.WARN, component="dn1")]
+    labels = Labels(
+        case_id="inc_dnvol_01",
+        root_cause=RootCause.DN_VOLUME,
+        expect=Expect(error_components=("dn1",)),
+    )
+    manifest = build_pack(tmp_path, records=records, labels=labels)
+    paths = pack_paths(tmp_path, "inc_dnvol_01")
+    problems = audit_levels(paths, manifest, read_labels(paths))
+    assert any("门槛全是 0" in problem for problem in problems)
+
+
+def test_audit_levels_accepts_warn_only_evidence(tmp_path: Path) -> None:
+    """旧语料里心跳/网络/安全模式三族只有 WARN —— 它们也要能过 V6。"""
+    records = [
+        make_record(1, T0, level=LogLevel.WARN, component="dn1"),
+        make_record(2, T0 + timedelta(seconds=1), level=LogLevel.WARN, component="dn1"),
+    ]
+    labels = Labels(
+        case_id="inc_dnvol_01",
+        root_cause=RootCause.DN_VOLUME,
+        expect=Expect(min_warn_lines=2, error_components=("dn1",)),
+    )
+    manifest = build_pack(tmp_path, records=records, labels=labels)
+    paths = pack_paths(tmp_path, "inc_dnvol_01")
+    assert audit_levels(paths, manifest, read_labels(paths)) == []
+
+
+def test_audit_levels_flags_expected_component_without_evidence(tmp_path: Path) -> None:
+    records = [make_record(1, T0, level=LogLevel.WARN, component="dn1")]
+    labels = Labels(
+        case_id="inc_dnvol_01",
+        root_cause=RootCause.DN_VOLUME,
+        expect=Expect(min_warn_lines=1, error_components=("dn2",)),
+    )
+    manifest = build_pack(tmp_path, records=records, labels=labels)
+    paths = pack_paths(tmp_path, "inc_dnvol_01")
     problems = audit_levels(paths, manifest, read_labels(paths))
     assert any("dn2" in problem for problem in problems)
+
+
+def test_audit_levels_flags_empty_error_components(tmp_path: Path) -> None:
+    records = [make_record(1, T0, level=LogLevel.WARN, component="dn1")]
+    labels = Labels(
+        case_id="inc_dnvol_01",
+        root_cause=RootCause.DN_VOLUME,
+        expect=Expect(min_warn_lines=1),
+    )
+    manifest = build_pack(tmp_path, records=records, labels=labels)
+    paths = pack_paths(tmp_path, "inc_dnvol_01")
+    problems = audit_levels(paths, manifest, read_labels(paths))
+    assert any("error_components 为空" in problem for problem in problems)

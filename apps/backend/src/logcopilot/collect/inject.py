@@ -136,10 +136,15 @@ def dn_volume_fill(
     *,
     container: str = "alcp-dn1",
     duration: timedelta = timedelta(minutes=10),
-    count_mb: int = 200,
+    count_mb: int = 4096,
     data_dir: str = DEFAULT_DN_DATA_DIR,
 ) -> InjectionPlan:
-    """`DN_VOLUME`：把 dn1 的 tmpfs 数据盘写满。"""
+    """`DN_VOLUME`：把 dn1 的 tmpfs 数据盘写满。
+
+    `count_mb` 必须**大于盘的容量**（默认 1024 vs 512）：`dd` 会一直写到 ENOSPC，
+    这才叫写满。原来写 200，盘升到 512 之后它只占 40%，故障根本没发生 ——
+    白白采了 20 分钟"正常态"，还因为 `expect_ok=False` 把失败吞掉了。
+    """
     return InjectionPlan(
         name="inject/dn_volume_fill",
         family="dn_volume",
@@ -275,6 +280,9 @@ def _utc_now() -> datetime:
 class CommandInjection:
     """把 `InjectionPlan` 变成采集器能调用的 `InjectionHook`。"""
 
+    # 故障段里每几秒 flush 一次。见 `__call__` 里的注释。
+    _FLUSH_EVERY = 5
+
     def __init__(
         self,
         plan: InjectionPlan,
@@ -306,6 +314,15 @@ class CommandInjection:
 
         # ① 先把"注入之前采到的行"落盘：这是"注入前系统是好的"的唯一证据。
         flush()
+
+        # ①.5 先做一次"复原"，把上一次没恢复干净的注入清掉。
+        # 实采踩到过：一次采集被 Ctrl-C 打断，`lab.fill` 留在 dn1 上，
+        # 下一次采集的 baseline 一起跳就是"盘 100%"，整段基线作废。
+        # 这一步是**幂等**的 best-effort：删不存在的文件、唤醒没暂停的容器
+        # 都返回非零，但都不该阻断采集。
+        for command in plan.restore:
+            self._runner(command.argv)
+
         started = self._clock()
         failure: Exception | None = None
         try:

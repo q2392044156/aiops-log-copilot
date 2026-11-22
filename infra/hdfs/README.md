@@ -35,7 +35,8 @@ docker compose down -v        # 连数据卷一起删（NN 的元数据也没了
 
 | 参数 | 值 | 为什么 |
 |---|---|---|
-| `dfs.replication` | 2 | 只有 3 台 DN，挂 1 台就进 Under-replicated |
+| `dfs.replication` | 3 | 挂 1 台立刻 2 < 3 → Under-replicated（见下方"为什么改 3 + 32MB 块"） |
+| `dfs.blocksize` | 33554432（32MB） | 块必须小于 dn1 的盘，否则 NN 永不选它 |
 | `dfs.datanode.du.reserved` | 0 | 数据盘写满立刻报 `DiskOutOfSpaceException`，不用等预留空间 |
 | `dfs.heartbeat.interval` | 2s | 心跳快，故障判定快 |
 | `dfs.namenode.heartbeat.recheck-interval` | 2000ms | 判 dead ≈ **24 秒**（默认值是 630 秒，10 分钟的故障窗里等不到） |
@@ -44,11 +45,25 @@ docker compose down -v        # 连数据卷一起删（NN 的元数据也没了
 
 ## 为什么 dn1 用 tmpfs
 
-`dn1` 的数据盘是 `tmpfs size=128m`，`dn2`/`dn3` 是普通卷。于是：
+`dn1` 的数据盘是 `tmpfs size=2g`，`dn2`/`dn3` 是普通卷。于是：
 
 - 造 `DN_VOLUME` 只需要往 dn1 的数据盘里 `dd` 一个文件，写满立刻触发 volume failure；
 - dn1 重启后数据盘清空，故障可重复，不留后遗症；
-- dn2/dn3 正常，保证 `replication=2` 的副本能正常落下来。
+- dn2/dn3 正常，保证 `replication=3` 的副本能正常落下来。
+
+## 为什么改 3 副本 + 32MB 块 + 2g 盘（2026-11-22 实采回填）
+
+第一版是 `replication=2`、默认 128MB 块、dn1 盘 128m。实采 20 分钟之后发现两件事：
+
+1. **dn1 一块都没接到**：NameNode 选副本的第一道门槛是 `available >= blocksize`，
+   128MB 的盘装不下 128MB 的块，于是所有块都去了 dn2/dn3（dn1 的
+   `DirectoryScanner: Total blocks: 0`）。把它的盘写满对集群**毫无影响** ——
+   采集窗口里 dn1 一行日志都没写。
+2. **512m 也不够**：workload 每分钟写 40–70MB，20 分钟光正常负载就能把 512m
+   写满，"故障段"其实从 baseline 就开始了，无法证明盘是注入写满的。
+
+现在：`blocksize=32m` + `replication=3` → 每个块三台都落，dn1 必然接块；
+`tmpfs size=2g` → 正常负载 20 分钟占 40–60%，`dd 4096MB` 才撞 ENOSPC。
 
 ## 故障注入
 
@@ -56,13 +71,13 @@ docker compose down -v        # 连数据卷一起删（NN 的元数据也没了
 
 ```bash
 DRY_RUN=1 bash inject/dn_volume_fill.sh      # 只打印要做什么
-bash inject/dn_volume_fill.sh                # 真写满 dn1 的 128MB 数据盘
+bash inject/dn_volume_fill.sh                # 真写满 dn1 的 2GB 数据盘（FILL_MB=4096）
 bash inject/dn_volume_restore.sh             # 删掉填盘文件并确认 df 能读
 ```
 
 | 根因 | 脚本 | 做了什么 |
 |---|---|---|
-| `DN_VOLUME` | `dn_volume_fill.sh` / `dn_volume_restore.sh` | 往 dn1 的 tmpfs 里 `dd` 200MB，必然 ENOSPC |
+| `DN_VOLUME` | `dn_volume_fill.sh` / `dn_volume_restore.sh` | 往 dn1 的 tmpfs 里 `dd` 4096MB（> 盘容量），必然 ENOSPC |
 | `DN_HEARTBEAT` | `dn_heartbeat_pause.sh` / `dn_heartbeat_resume.sh` | `docker pause`（SIGSTOP）：进程在、心跳停 |
 | `DN_HEARTBEAT` | `dn_heartbeat_stop.sh` / `dn_heartbeat_start.sh` | `docker stop`：进程没了，重启重新注册块 |
 | `NN_SAFE_MODE` | `nn_safemode_enter.sh` / `nn_safemode_leave.sh` | `dfsadmin -safemode enter/leave` |

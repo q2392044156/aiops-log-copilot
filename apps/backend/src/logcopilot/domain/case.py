@@ -850,6 +850,17 @@ class Expect:
 
     这是"采集是否采到了故障"的唯一判据：没有它，一个 3 行的 safe_mode 例子
     和一个 239 行的 network 例子没法用同一套标准验收。
+
+    ## 门槛可以是 0，但不能全是 0
+
+    `min_error_lines` / `min_warn_lines` 是**实测下限**，允许为 0 —— HDFS 的
+    多数故障只有 WARN（心跳、网络、安全模式三族在旧语料里 ERROR 皆 0）。
+    但两者之和必须 ≥ 1：一条"ERROR>=0 且 WARN>=0"的 expect 什么都没要求，
+    等于没标注，故障没被采到也照样过。
+
+    `error_components` 的名字里虽然写着 error，语义早已放宽成**"哪个组件会
+    出现非 INFO（WARN 或 ERROR）记录"**。字段名沿用是为了不动 schema ——
+    它进 labels 契约，改名会让已迁的 132 个 pack 一起要动。
     """
 
     min_error_lines: int = 0
