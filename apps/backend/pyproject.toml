@@ -25,13 +25,16 @@ addopts = "-q"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-src = ["src", "tests"]
+src = ["src", "tests", "../../scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pyright]
-include = ["src", "tests"]
+# scripts/ 在仓库根（计划 §8 的约定），配置在 apps/backend —— 所以用 ../.. 指回去。
+# 不把 scripts 纳入检查的话，pack_lint.py 这类"只被 make 调用"的脚本会一直在
+# ruff/pyright 的视野外，改坏了也没人拦。
+include = ["src", "tests", "../../scripts"]
 extraPaths = ["src"]
 typeCheckingMode = "standard"
 # 告诉 pyright 用 uv 建的这个虚拟环境去解析 pytest 等第三方包
