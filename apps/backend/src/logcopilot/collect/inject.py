@@ -332,10 +332,17 @@ class CommandInjection:
             #    会采一拍指标，于是 10 分钟的故障段里指标是一条连续曲线，
             #    而不是"注入前后各一个点"。日志说 DN 死了、指标说
             #    dead_datanodes 从 3 掉到 2，两边的时刻要对得上才行。
-            seconds = max(1, int(plan.duration.total_seconds()))
-            step = plan.duration.total_seconds() / seconds
-            for _ in range(seconds):
-                self._sleeper(step)
+            #
+            #    计时必须按**截止时刻**算，不能按"睡够多少次"算：`flush()`
+            #    自身要花时间（drain + docker stats 每拍 3–5 秒），按次数算
+            #    会让 5 分钟的故障段实际跑成 10 分钟，`ended` 越过窗口上界，
+            #    回收段里落的其实还是故障态日志（2026-11-22 实采踩到）。
+            deadline = started + plan.duration
+            while True:
+                remaining = (deadline - self._clock()).total_seconds()
+                if remaining <= 0:
+                    break
+                self._sleeper(min(1.0, remaining))
                 flush()
         except Exception as exc:  # noqa: BLE001 - 要保证 restore 一定被执行
             failure = exc

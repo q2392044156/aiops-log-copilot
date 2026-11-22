@@ -132,10 +132,17 @@ def test_happy_path_returns_ordered_injection_and_verifies_restore() -> None:
     assert result.script == "inject/dn_heartbeat_pause"
     assert result.started <= result.ended <= result.restored  # type: ignore[operator]
     assert result.restored_ok is True
-    # 注入前 1 次 + 故障段每秒 1 次：故障期间指标/日志必须一直在落盘，
-    # 否则 10 分钟的故障段会变成"前后两个点"。
-    assert len(flushed) == 1 + 600
-    assert sleeps == [1.0] * 600  # 600 秒，代价是每次只睡 1 秒
+    # 故障段落盘的节奏：至少每秒一拍（注入前那一次之外），否则 10 分钟的
+    # 故障段会退化成"前后两个点"。这里不断言精确次数 —— `flush()` 自身
+    # 在真机上要花 3–5 秒，次数取决于它有多慢。
+    assert len(flushed) >= 600
+    assert set(sleeps) == {1.0}, "每拍最多睡 1 秒，剩下的时间留给 flush 自己花"
+    # 真正钉死的是**时长**：故障段必须恰好等于声明时长，不能因为 flush 慢
+    # 就一路拖过窗口上界（2026-11-22 实采踩到过 ended 越过 window.until）。
+    # 到期就停，不再"多睡几轮"。上界放宽 1 秒是因为 `FakeClock` 每读一次
+    # 就前进一秒（读到截止时刻的那一次读数会把 ended 记成 +1s）。
+    duration = _plan().duration
+    assert duration <= result.ended - result.started <= duration + timedelta(seconds=1)  # type: ignore[operator]
     assert runner.called_with("docker pause")
     assert runner.called_with("docker unpause")
 

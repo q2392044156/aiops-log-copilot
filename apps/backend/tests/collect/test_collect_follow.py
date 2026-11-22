@@ -298,7 +298,7 @@ def test_inject_keeps_collecting_metrics_during_the_fault(tmp_path: Path) -> Non
     collector = _collector(root, clock, until=T0 + timedelta(minutes=1), metrics=session)
     report = collector.collect(
         mode=CollectMode.INJECT,
-            hook=hook,
+        hook=hook,
         follow_until=T0 + timedelta(minutes=1),
         poll_interval=2.0,
         sleeper=_sleep_advancing(clock, path),

@@ -38,7 +38,7 @@ class Measured:
 
     lines: int
     by_level: dict[str, int]
-    error_components: tuple[str, ...]
+    noisy_by_component: dict[str, int]
 
     @property
     def error_lines(self) -> int:
@@ -49,11 +49,33 @@ class Measured:
         return self.by_level.get(LogLevel.WARN.value, 0)
 
     @property
+    def error_components(self) -> tuple[str, ...]:
+        """出现过非 INFO（WARN 或 ERROR）记录的**全部**组件。"""
+        return tuple(sorted(self.noisy_by_component))
+
+    @property
     def noisy_components(self) -> tuple[str, ...]:
-        """出现过非 INFO（WARN 或 ERROR）记录的组件。"""
         return self.error_components
 
-    def suggest_expect(self) -> Expect:
+    def dominant_components(self, *, min_share: float = 0.2) -> tuple[str, ...]:
+        """占非 INFO 记录 ≥ `min_share` 的组件 —— 这才是"故障打在哪"。
+
+        为什么要份额而不是"出现过就算"：集群本身有噪声底（`Unexpected value
+        for data transfer bytes=45 duration=0` 在三台 DN 上都有），把"出现过
+        一条 WARN"的组件都写进 `expect.error_components`，等于没标注。
+        """
+        total = sum(self.noisy_by_component.values())
+        if total == 0:
+            return ()
+        return tuple(
+            sorted(
+                name
+                for name, count in self.noisy_by_component.items()
+                if count / total >= min_share
+            )
+        )
+
+    def suggest_expect(self, *, min_share: float = 0.2) -> Expect:
         """按实测值给出门槛。
 
         门槛用实测值，不是"至少 1 条"：上次采到几条，这次至少也得有这么多，
@@ -64,7 +86,7 @@ class Measured:
         return Expect(
             min_error_lines=self.error_lines,
             min_warn_lines=self.warn_lines,
-            error_components=self.error_components,
+            error_components=self.dominant_components(min_share=min_share),
         )
 
 
@@ -77,7 +99,7 @@ def measure(paths: CasePackPaths) -> Measured:
     if not paths.logs.is_file():
         raise LabelError(f"{paths.logs} 不存在 —— 这不是一个采完的 pack")
     by_level: dict[str, int] = {}
-    errors: set[str] = set()
+    noisy: dict[str, int] = {}
     lines = 0
     with paths.logs.open(encoding="utf-8") as handle:
         for raw in handle:
@@ -89,8 +111,9 @@ def measure(paths: CasePackPaths) -> Measured:
             by_level[level] = by_level.get(level, 0) + 1
             lines += 1
             if level != LogLevel.INFO.value:
-                errors.add(str(row["component"]))
-    return Measured(lines=lines, by_level=by_level, error_components=tuple(sorted(errors)))
+                component = str(row["component"])
+                noisy[component] = noisy.get(component, 0) + 1
+    return Measured(lines=lines, by_level=by_level, noisy_by_component=noisy)
 
 
 def annotate(
@@ -102,6 +125,8 @@ def annotate(
     notes: str | None = None,
     expect: Expect | None = None,
     from_measurements: bool = False,
+    min_error: int | None = None,
+    min_warn: int | None = None,
     force: bool = False,
 ) -> Labels:
     """改 `labels.json` 里点名的那几个字段，其余原样保留。
@@ -118,6 +143,14 @@ def annotate(
     # 顺序反了的话，`from_measurements=True` 会在守卫之后才生成 expect，守卫形同虚设。
     if from_measurements:
         expect = measure(paths).suggest_expect()
+    if expect is not None and (min_error is not None or min_warn is not None):
+        # 门槛是"判定线"，不是"这次的实测值"。实测 564 条 WARN 就写 564，
+        # 重采一次少一条 V6 就红 —— 所以门槛一律由人给，实测只用来选组件。
+        expect = Expect(
+            min_error_lines=min_error if min_error is not None else expect.min_error_lines,
+            min_warn_lines=min_warn if min_warn is not None else expect.min_warn_lines,
+            error_components=expect.error_components,
+        )
     if expect is not None and current.expect is not None and not force:
         raise LabelError("labels.expect 已存在；要覆盖请显式 force=True（门槛被改就等于 V6 失效）")
 

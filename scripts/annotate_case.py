@@ -45,6 +45,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--severity", default=None, help="info / warn / error / critical")
     parser.add_argument("--reviewer", default=None)
     parser.add_argument("--notes", default=None)
+    parser.add_argument(
+        "--min-warn",
+        type=int,
+        default=None,
+        metavar="N",
+        help="手工指定 WARN 门槛（实测只是参考值，门槛要留出重采波动）",
+    )
+    parser.add_argument(
+        "--min-error",
+        type=int,
+        default=None,
+        metavar="N",
+        help="手工指定 ERROR 门槛（服务端日志里几乎恒为 0，除非 DN 启动失败）",
+    )
     parser.add_argument("--force", action="store_true", help="覆盖已经填过的 expect")
     parser.add_argument("--check", action="store_true", help="只看现状，不写")
     args = parser.parse_args(argv)
@@ -77,6 +91,10 @@ def main(argv: list[str] | None = None) -> int:
             reviewer=args.reviewer,
             notes=args.notes,
             from_measurements=args.from_measurements,
+            # 手填的门槛优先于实测：`--from-measurements` 给的是"这次采到了多少"，
+            # 直接当门槛用，重采一次只要少一条 WARN 就红。
+            min_warn=args.min_warn,
+            min_error=args.min_error,
             force=args.force,
         )
     except (LabelError, ValueError) as exc:
