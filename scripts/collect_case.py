@@ -112,6 +112,13 @@ def _describe(report: CollectReport) -> str:
     rows.append(f"  脱敏计数       {dict(counters.redacted)}")
     rows.append(f"  canonical      {report.manifest.hashes.canonical_sha256}")
     rows.append(f"  fingerprint    {report.manifest.hashes.input_fingerprint}")
+    # 窗口外被丢掉的记录：>0 说明收尾那一轮读到了窗口上界之后的几秒。
+    # 不是错误（窗口是硬边界），但要让人看见"丢了几个"，而不是猜。
+    if report.dropped_out_of_window:
+        rows.append(
+            f"  窗口外丢弃     {report.dropped_out_of_window} 条"
+            "（收尾那一轮读到了 until 之后写出的日志，已按硬边界丢弃）"
+        )
     return "\n".join(rows)
 
 

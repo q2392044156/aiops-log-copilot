@@ -400,3 +400,36 @@ def test_start_at_end_rejects_adapter_without_prime(tmp_path: Path) -> None:
 
     with pytest.raises(CollectError, match="不支持 start_at_end"):
         collector.collect(follow_until=T0 + timedelta(seconds=1), sleeper=clock.advance)
+
+
+# ------------------------------------------------------ 窗口上界的硬边界
+
+
+def test_records_written_after_the_window_are_dropped(tmp_path: Path) -> None:
+    """收尾那一轮读到的、时间戳越过 `until` 的记录必须被丢掉。
+
+    真实故障来自 20 分钟的那次采集：`_follow` 在 `now >= until` 前还会 drain
+    一轮，那一轮读到了 `until` 之后写出来的几行，于是
+    `checkpoint.last_ts > window.until`，manifest 直接把整次采集判成
+    "采到了窗口外的数据"。这里把那个现场压成 4 秒。
+    """
+    path = _log(tmp_path / "logs", 2)
+    clock = FakeClock(T0)
+    until = T0 + timedelta(seconds=4)
+
+    def sleep(seconds: float) -> None:
+        clock.advance(seconds)
+        # 睡醒时已经越过窗口上界，日志里又长出一条 10:00:09 的行
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write("[aiops-lab-dn1] 2026-11-22 10:00:09 INFO  FsDatasetImpl:425 - 窗口外\n")
+
+    collector = _collector(tmp_path / "logs" / "cases", clock, until=until)
+    report = collector.collect(follow_until=until, poll_interval=4.0, sleeper=sleep)
+
+    # 窗口内 2 条留下，窗口外 1 条丢账。
+    assert report.records == 2
+    assert report.dropped_out_of_window == 1
+    # 关键：manifest 不再被"晚了几秒"顶掉，且 last_ts 卡在窗口内。
+    last_ts = report.manifest.checkpoint.last_ts
+    assert last_ts is not None and last_ts <= until
+    assert all(row["message"] != "窗口外" for row in _records(tmp_path / "logs" / "cases"))

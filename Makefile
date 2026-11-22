@@ -17,7 +17,7 @@ PY      := $(UV) run --project $(BACKEND) python
 ARGS    ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint fmt type test pack-lint verify-collect ask
+.PHONY: help install lint fmt type test pack-lint verify-collect collect annotate annotate-check ask
 
 help:
 	@echo 用法: make 目标   [ARGS=附加参数]
@@ -25,9 +25,11 @@ help:
 	@echo   lint            ruff 静态检查 + 格式检查（只查不改）
 	@echo   fmt             ruff 格式化 + 自动修可修的 lint 问题（会改文件）
 	@echo   type            pyright 类型检查（首次运行要下一份 node，较慢）
-	@echo   test            pytest（当前 392 条契约测试）
+	@echo   test            pytest（当前 404 条契约测试）
 	@echo   pack-lint       校验 CasePack：make pack-lint CASE=inc_dnvol_01 CHECK=levels
 	@echo   verify-collect  132/132 一致性核验（第 11 步才有脚本）
+	@echo   collect         采一个病例：make collect CASE=base_healthy_01 ARGS="--minutes 5"
+	@echo   annotate        补标注：make annotate CASE=inc_dnvol_01 ARGS="--from-measurements"
 	@echo   ask             命令行问答入口（第 9 步才有脚本）
 
 # ---------------------------------------------------------------------------
@@ -86,3 +88,19 @@ ifeq ($(wildcard scripts/ask.py),)
 else
 	$(PY) scripts/ask.py $(ARGS)
 endif
+
+# ---------------------------------------------------------------------------
+# 现场采集（第 15、16 步落地）：collect 采一例，annotate 补人的判断
+# ---------------------------------------------------------------------------
+# 两个目标都要 CASE=：采集必须有 case_id（它同时是目录名），标注必须知道改哪个 pack。
+collect:
+	$(PY) scripts/collect_case.py --case $(CASE) $(ARGS)
+
+annotate:
+	$(PY) scripts/annotate_case.py --case $(CASE) $(ARGS)
+
+# 把一例从"采完"推到"可验收"：先按实测填门槛，再按 V6 复查一遍。
+# 两条命令一起做，是因为分开跑很容易只填门槛、忘了复查（或反过来）。
+annotate-check:
+	$(PY) scripts/annotate_case.py --case $(CASE) $(ARGS)
+	$(PY) scripts/pack_lint.py --case $(CASE) --check levels

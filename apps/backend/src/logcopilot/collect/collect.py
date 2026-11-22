@@ -245,9 +245,15 @@ class _Accumulator:
     records: int = 0
     parse_failed: int = 0
     last_ts: datetime | None = None
+    # 读到了、但时间戳落在窗口上界之后的记录数。行本身已经被消费（offset 前进、
+    # 进 raw 哈希链），所以它们不会在续采时再出现 —— 丢的是"记录"，不是"字节"。
+    dropped: int = 0
 
-    def absorb(self, lines: Sequence[RawLine], result: CanonicalResult) -> None:
+    def absorb(
+        self, lines: Sequence[RawLine], result: CanonicalResult, *, dropped: int = 0
+    ) -> None:
         self.raw_lines += len(lines)
+        self.dropped += dropped
         self.records += len(result.records)
         self.parse_failed += sum(
             1 for record in result.records if record.parse_status is not ParseStatus.OK
@@ -278,6 +284,9 @@ class CollectReport:
     records: int
     parse_failed: int
     injection: FaultInjection | None = None
+    # 跟随收尾时撞到窗口上界、被丢掉的记录数（见 `_drain` 的窗口过滤）。
+    # 一般是 0 或个位数；大于 0 说明最后一轮读到了窗口外的几秒。
+    dropped_out_of_window: int = 0
 
     @property
     def dir(self) -> str:
@@ -489,6 +498,7 @@ class Collector:
             records=acc.records,
             parse_failed=acc.parse_failed,
             injection=injection,
+            dropped_out_of_window=acc.dropped,
         )
 
     # ------------------------------------------------------------ 内部：采集
@@ -500,9 +510,10 @@ class Collector:
         acc: _Accumulator,
         *,
         check_window: bool,
+        until: datetime | None = None,
     ) -> None:
         for spec in self._sources:
-            self._drain(paths, writer, acc, spec, check_window=check_window)
+            self._drain(paths, writer, acc, spec, check_window=check_window, until=until)
 
     def _drain(
         self,
@@ -512,6 +523,7 @@ class Collector:
         spec: SourceSpec,
         *,
         check_window: bool,
+        until: datetime | None = None,
     ) -> None:
         """采一个组件：读流 → 解析 → 写盘 → 存 checkpoint。
 
@@ -528,6 +540,18 @@ class Collector:
 
         所以进来时量一下 `logs.jsonl` 的字节数，出事就截回那个位置 ——
         "checkpoint 指向哪，盘上就只能有到哪的记录"是一条硬不变式。
+
+        ## 为什么窗口上界是硬边界
+
+        跟随收尾那一轮读的是"此刻已写出来的行"，而这些行的时间戳可能已经
+        越过 `until`（日志写出来总是比时钟滞后一点，收尾那一刻又多读了几秒）。
+        不拦的话 `checkpoint.last_ts > window.until`，manifest 直接把整次
+        采集判成"采到了窗口外的数据"—— 20 分钟白采。
+
+        拦法是**丢记录、不丢字节**：`ts > until` 的记录不写盘、不进 counters，
+        但它们确实被消费了（offset 已前进、已进 raw 哈希链），所以续采不会
+        再读到它们，`dropped` 计数把它们记在账上。窗口上界不右移 ——
+        "采 5 分钟"就得是 5 分钟，否则每个 pack 的窗口长度都不一样。
         """
         # 只把**本组件**的流状态交给 ComponentReader：line_no 是"组件内连续
         # 编号"，若把别的组件的状态也传进去，编号会从别人的最大值接着走。
@@ -547,11 +571,23 @@ class Collector:
                 since=self._window.since,
                 redact=self._redactor,
             )
+            dropped = 0
+            if until is not None and result.records:
+                kept = tuple(record for record in result.records if record.ts <= until)
+                dropped = len(result.records) - len(kept)
+                if dropped:
+                    # 只换掉 records，raw_line_count/redacted 保持原样：
+                    # 那几行确实被读进来、也被脱敏统计过了，只是不该成为记录。
+                    result = CanonicalResult(
+                        records=kept,
+                        raw_line_count=result.raw_line_count,
+                        redacted=result.redacted,
+                    )
             if check_window and result.records:
                 assert_within_window(result.records, self._window)
 
             writer.extend(result.records)
-            acc.absorb(lines, result)
+            acc.absorb(lines, result, dropped=dropped)
             acc.states.update(reader.checkpoint())
             self._save_checkpoint(paths, acc)
         except BaseException:
@@ -589,12 +625,12 @@ class Collector:
         if self._clock() >= until:
             # 时间已经到了就没有"跟随"可言，但仍读一轮：调用方可能只想
             # 把现有日志收干净（例如 attach 之后补最后一段）。
-            self._drain_all(paths, writer, acc, check_window=check_window)
+            self._drain_all(paths, writer, acc, check_window=check_window, until=until)
             self._sample_metrics(metrics_writer)
             return
         rounds = 0
         while True:
-            self._drain_all(paths, writer, acc, check_window=check_window)
+            self._drain_all(paths, writer, acc, check_window=check_window, until=until)
             self._sample_metrics(metrics_writer)
             rounds += 1
             now = self._clock()
