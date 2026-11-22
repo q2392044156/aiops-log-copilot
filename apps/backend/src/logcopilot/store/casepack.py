@@ -53,6 +53,10 @@ LABELS_FILE: Final[str] = "labels.json"
 ANCHORS_DIR: Final[str] = "anchors"
 ANCHORS_INDEX: Final[str] = "index.json"
 
+#: 采集期的 checkpoint sidecar。名字与格式由 `collect/collect.py` 定义，
+#: 但路径归这里管 —— "pack 目录里有哪些文件"只能有一个定义处。
+CHECKPOINT_FILE: Final[str] = "checkpoint.json"
+
 #: anchors/index.json 自己的版本号。它与 manifest.schema 分开升版本：
 #: 指针格式（加个字段）比 pack 结构（加个文件）变得更频繁。
 ANCHORS_SCHEMA: Final[str] = "anchors/v1"
@@ -127,6 +131,23 @@ class CasePackPaths:
     @property
     def anchors_index(self) -> Path:
         return self.anchors_dir / ANCHORS_INDEX
+
+    @property
+    def checkpoint_file(self) -> Path:
+        """采集期的 checkpoint sidecar（P-A §5 目录树之外的一处增补）。
+
+        为什么不在 §5 的四个文件里：`manifest.json` 是 finalize **最后**写
+        的（写了才算完成），而采一例要 20 分钟、中途 Ctrl-C 是常态。把
+        checkpoint 也压到最后的 manifest 里，等于中断就什么都不记得。
+
+        生命周期：`collect/collect.py` 每采完一个组件重写它一次；
+        finalize 成功后 checkpoints 已并进 manifest，这个文件被删除。
+        """
+        return self.dir / CHECKPOINT_FILE
+
+    @property
+    def is_finalized(self) -> bool:
+        return self.manifest.is_file()
 
 
 def pack_paths(root: Path | str, case_id: str) -> CasePackPaths:
@@ -203,6 +224,20 @@ def open_log_writer(paths: CasePackPaths) -> LogWriter:
     if not paths.dir.is_dir():
         raise CasePackError(f"{paths.dir} 不存在 —— 先调 create_pack")
     return LogWriter(paths.logs)
+
+
+def write_labels(paths: CasePackPaths, labels: Labels) -> None:
+    """重写 `labels.json`（原子写）。
+
+    `create_pack` 会把 labels 写一次，但注入模式需要**再写一次**：注入脚本
+    执行完之后才知道 `fault_injection{started, ended, restored}` 是什么。
+    标注是被事实补充的，不是一开始就全知道的。
+    """
+    if labels.case_id != paths.case_id:
+        raise CasePackError(f"labels.case_id={labels.case_id!r} 与目录名 {paths.case_id!r} 不一致")
+    if not paths.dir.is_dir():
+        raise CasePackError(f"{paths.dir} 不存在 —— 先调 create_pack")
+    _atomic_write_text(paths.labels, labels.to_json())
 
 
 # ---------------------------------------------------------------- 读

@@ -44,9 +44,7 @@ def _discover(root: Path) -> list[Path]:
     if not root.is_dir():
         return []
     return sorted(
-        child
-        for child in root.iterdir()
-        if child.is_dir() and (child / "manifest.json").is_file()
+        child for child in root.iterdir() if child.is_dir() and (child / "manifest.json").is_file()
     )
 
 
@@ -106,9 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     for directory in dirs:
         paths = pack_paths(root, directory.name)
         if not is_complete(paths):
-            print(
-                f"[pack-lint] {directory}\n  FAIL  files: 缺 manifest.json —— 采集未完成"
-            )
+            print(f"[pack-lint] {directory}\n  FAIL  files: 缺 manifest.json —— 采集未完成")
             failed += 1
             continue
 
