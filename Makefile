@@ -25,7 +25,7 @@ help:
 	@echo   lint            ruff 静态检查 + 格式检查（只查不改）
 	@echo   fmt             ruff 格式化 + 自动修可修的 lint 问题（会改文件）
 	@echo   type            pyright 类型检查（首次运行要下一份 node，较慢）
-	@echo   test            pytest（当前 316 条契约测试）
+	@echo   test            pytest（当前 334 条契约测试）
 	@echo   pack-lint       校验 CasePack：make pack-lint CASE=inc_dnvol_01 CHECK=levels
 	@echo   verify-collect  132/132 一致性核验（第 11 步才有脚本）
 	@echo   ask             命令行问答入口（第 9 步才有脚本）
@@ -66,17 +66,19 @@ pack-lint:
 	$(PY) scripts/pack_lint.py $(if $(CASE),--case $(CASE),) $(if $(CHECK),--check $(CHECK),) $(ARGS)
 
 # ---------------------------------------------------------------------------
+# verify-collect：V2 的 132/132 一致性闸门
+#
+# 它比的是 `tests/fixtures/verify/baseline.json` 里冻结的指纹，不是"能不能跑"。
+# 改了输出而基准没更新 → 这里必须红。确认变化是有意的，再
+# `make verify-collect ARGS="--update-baseline"` 并把基准文件一起提交。
+# ---------------------------------------------------------------------------
+verify-collect:
+	$(PY) scripts/verify_collect.py $(if $(CASE),--case $(CASE),) $(ARGS)
+
+# ---------------------------------------------------------------------------
 # 还只有名字的目标：脚本没写就打印一句人话，而不是扔 "can't open file" 让人
 # 以为环境坏了。
 # ---------------------------------------------------------------------------
-verify-collect:
-ifeq ($(wildcard scripts/verify_collect.py),)
-	@echo [verify-collect] 尚未实现: scripts/verify_collect.py 在第 11 步落地
-	@exit 1
-else
-	$(PY) scripts/verify_collect.py $(ARGS)
-endif
-
 ask:
 ifeq ($(wildcard scripts/ask.py),)
 	@echo [ask] 尚未实现: scripts/ask.py 在第 9 步落地

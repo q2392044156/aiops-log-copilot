@@ -1,6 +1,6 @@
 # P-A 采集流水线 · 实现计划
 
-> **版本**：v0.2（2026-11-22）
+> **版本**：v0.3（2026-11-22）
 > **上游文档**：`IMPLEMENTATION_PLAN.md` v1.0 的 §4.1（P-A 段落）/ §5（CasePack 契约与目录形状）/ §7（S1 里程碑）/ §8.2（红线）
 > **本文边界**：只讲 **P-A（采集）** 这一段——采什么日志、用什么环境采、采哪些等级与窗口、A1/A2/A3 各做什么、怎么验收。
 > **不管**：窗口切分 / 模板 / 门禁 / 事件合并（那是旧项目已有的检测侧，新项目不复现）、检索与诊断（P-B / P-C）。
@@ -19,7 +19,7 @@
 | ✅ | **DataNode 主日志** | `/opt/hadoop/logs/hadoop-hdfs-datanode-<host>.log` | log4j pattern | `DN_VOLUME`（卷失败）、`DN_HEARTBEAT`（注册/心跳）、`DataXceiver` 连接错误都在这 |
 | ✅ | **HDFS 审计日志** | `/opt/hadoop/logs/hdfs-audit.log` | 空白分隔 KV | 谁删了块、谁触发了 safemode——用它补"人的动作"这条链 |
 | ✅ | **NameNode GC 日志** | `/opt/hadoop/logs/hadoop-hdfs-namenode-*-gc.log`（可选） | JVM GC | 成本≈0，`NN_SAFE_MODE` 里"内存不足触发"的场景需要它 |
-| ✅ | **容器 stdout/stderr** | `docker logs` | 混合 | 容器启动失败、OOMKilled、镜像内脚本报错**只在标准输出里**，日志文件里看不到 |
+| ✅ | **容器 stdout/stderr** | `/opt/hadoop/logs/<component>.out`（由 compose 的 `tee` 落盘） | 混合 | 容器启动失败、OOMKilled、镜像内脚本报错**只在标准输出里**，日志文件里看不到。**不用 `docker logs` 采**：它给不出字节偏移，续采会重读或漏读（O7）；落成文件后与主日志走同一条 `tail -c` 语义 |
 | ✅ | **指标快照**（不是日志） | `docker stats` + `hdfs dfsadmin -report` + `df -h` | JSON | `DN_VOLUME` 的"容量趋势"、`DN_HEARTBEAT` 的"DN 存活数"必须靠指标定论，日志只能证明"报错了" |
 | ⬜ 扩展位 | syslog / journald / dmesg | — | syslog | **本期不做**：格式与 log4j 完全不同，canonical 规则要另写一套；`adapters/http.py` 留位 |
 | ⬜ 扩展位 | YARN / Spark / Hive 日志 | — | log4j | **本期不做**：多一种组件 = 多一套领域知识，深度换广度不划算 |
@@ -260,7 +260,7 @@ data/cases/<case_id>/
 | 项 | 决策 |
 |---|---|
 | adapter 数量 | `file`、`docker`、`wsl`（本期只做前两个，`wsl` 留骨架，`http` 只留 Protocol 注释） |
-| docker adapter 的两种取数 | ①`docker logs --since` 拿 stdout；②`docker exec cat <容器内路径>` 拿日志文件（**Hadoop 镜像把日志写文件，stdout 几乎是空的——这一点不搞清会白采一轮**）；同一 adapter 用 `--path` 区分 |
+| docker adapter 的取数 | **只用一种语义：把容器当远端文件系统**。`stat -c '%i %s'` 拿 inode/size、`tail -c +N` 拿 offset 之后的字节、`sh -c 'tail -c +N … \| head -c L'` 拿 offset 前一行、`ls -1` 解析 glob。**不用 `docker logs --since`**：它只给时间戳不给字节偏移，续采只能猜，V3（不重不漏）当场失守；而 Hadoop 镜像把日志写文件，stdout 本来也几乎是空的。容器 stdout 用 §2 的 `tee` 落成 `<component>.out` 再走同一条 `tail -c` 路径（**O7 已闭环**） |
 | 增量与续采 | 每次记录 `(inode, offset, line_no, tail_line_sha1)`；恢复时先 `tail` 校验最后一行 sha1 一致，再从 offset+1 读，**不重不漏**；`line_no` 用于恢复后继续给 `id` 编号 |
 | 时间窗 | `--minutes` 相对窗口 + `--since/--until` 绝对窗口；时钟统一 UTC |
 | 指标 | 每 5s 一次 `docker stats --no-stream`；每 30s 一次 `dfsadmin -report` 与 `df -h` |
@@ -334,16 +334,18 @@ data/cases/<case_id>/
 | # | 验收项 | 命令 | 门槛 |
 |---|---|---|---|
 | V1 | 采样可通过 lint | `make pack-lint` | 1 个 sample CasePack 全字段合法 |
-| V2 | 旧 132 例迁移一致 | `make verify-collect` | **132/132**：每例的 行数 / ts 序列 / level 分布 / component 分布 与**独立 oracle** 相等；差异白名单为空 |
+| V2 | 旧 132 例迁移一致 | `make verify-collect` | **132/132**：每例的 行数 / level 分布 / component 分布 / 两个哈希 与**独立第二实现**重算的结果相等，且与 `tests/fixtures/verify/baseline.json` 冻结的基准逐字段相等；差异白名单为空 |
 | V3 | 续采不重不漏 | 采 → `Ctrl-C` → `--resume` | 合并后行数 == 一次性采满的行数；`id` 集合完全相同（无重复、无遗漏） |
 | V4 | 两条读路径一致 | 同窗口分别用 `file` 与 `docker --path` 采 | `canonical_sha256` 相等（canonical 投影已排除 `source`，见 §6.3） |
 | V5 | 正常例零 ERROR | `make pack-lint CASE=base_healthy_01 CHECK=levels` | `by_level.ERROR == 0` |
-| V6 | 故障例有证据 | `make pack-lint CASE=inc_dnvol_01 CHECK=levels`（3 个 `inc_*` 各跑一次） | `by_level.ERROR >= 1` 且出现在 `expect.error_components` 里 |
+| V6 | 故障例有证据（**只对 `origin=collected` 的新采例成立**） | `make pack-lint CASE=inc_dnvol_01 CHECK=levels`（3 个 `inc_*` 各跑一次） | `by_level.ERROR >= 1` 且出现在 `expect.error_components` 里 |
 | V7 | 可逆 | 每个 inject 脚本执行 `_restore.sh` 后跑 | `dfsadmin -report` 的 Live DN 数回到 3；`safemode get` 回 OFF |
 | V8 | 脱敏有账 | 任意样例 | `counters.redacted` 四类字段齐全，`ip`/`path` 两类 > 0 且与 `grep` 抽查一致；旧数据命中已有占位符时为 0 且**不算失败** |
 | V9 | 旧两种语法都能解析 | `pytest tests/collect/ -k lab` | 语法 A / 语法 B / 带前缀续行 三类 fixture 全部 `ok` 或 `partial`，`failed == 0` |
 
-> **V2 的基准从哪来（v0.1 漏了）**：旧 132 例的 `evidence/logs/*.log` 实测只有 3–239 行，而 `data/processed/*/logs.parquet` 是旧项目的全量语料、**不是这 132 例的切片**。所以"行数 / ts 序列 / 分布全等"不能拿新解析器自己当参照——基准必须是 awk/grep 直接从 `.log` 数出来、冻结在 `tests/fixtures/migrate/` 里的期望值。V9 是 V2 的前置检查。
+> **V2 的基准从哪来（v0.1 漏了）**：旧 132 例的 `evidence/logs/*.log` 实测只有 2–993 行，而 `data/processed/*/logs.parquet` 是旧项目的全量语料、**不是这 132 例的切片**。所以"全等"不能拿新解析器自己当参照。现在的做法是两层：①`store/verify.py` 用**独立第二实现**只读 `logs.jsonl` 文本重算（不 import `domain.log`、不调 `casepack` 的计算函数），与生产者只共享契约；②把通过时的指纹冻结进 `tests/fixtures/verify/baseline.json`，此后任何一例的任何数字变化都算失败，必须显式 `--update-baseline` 并让基准 diff 出现在提交里。V9 是 V2 的前置检查。
+>
+> **V6 为什么只对新采例成立**：迁移的 132 例里 `ERROR` 只出现在 `DN_VOLUME`（28/28 例），心跳 37 例、网络 21 例、安全模式 46 例**一行 ERROR 都没有**（P-E 的"漏检"口径必须知道这件事）。拿旧数据卡 V6 只会逼人反填 `expect`，所以 `audit_levels()` 对 `origin=migrated` 直接放行；V6 的证据只认 `origin=collected`。
 
 ---
 
@@ -377,10 +379,10 @@ data/cases/<case_id>/
 | M1.3 | `collect/adapters/base.py` | `SourceAdapter` Protocol（`open / read / resume`）**定义在这里**——它是 P-A 阶段内接口，不进 `ports.py`（总计划 §5 的 `ports.py` 只放跨阶段四件 `LlmClient / Retriever / CaseStore / Clock`） | `domain/log.py` |
 | M1.3 | `ports.py`（`CaseStore` 段） | 跨阶段的案例读写 Protocol，P-A 只加这一个 | `domain/case.py` |
 | M1.3 | `collect/adapters/file.py` | 本地文件 / 分片 / `offset + line_no` 续采 | `collect/adapters/base.py` |
-| M1.3 | `collect/adapters/docker.py` | `docker logs` + `docker exec cat` 两种取数 | 同上 |
+| M1.3 | `collect/adapters/docker.py` | 容器当远端文件系统：`stat -c` / `tail -c +N` / `ls -1` 还原同一套 offset 语义（不用 `docker logs --since`） | 同上 |
 | M1.3 | `collect/collect.py` | 编排：多源并行、checkpoint、指标采样、注入调度 | 以上 |
 | M1.3 | `scripts/ask.py` | **最小闭环**：CasePack → 关键词检索 → 模板报告 | `store/casepack.py` |
-| M1.4 | `collect/migrate.py` + `scripts/verify_collect.py` | 旧 132 例 → CasePack（`canonical_profile=lab`）+ 四项比对 | `store/casepack.py` |
+| M1.4 | `collect/migrate.py` + `store/verify.py` + `scripts/verify_collect.py` + `tests/fixtures/verify/baseline.json` | 旧 132 例 → CasePack（`canonical_profile=lab`）；V2 = 独立第二实现 + 冻结基准逐例对账 | `store/casepack.py` |
 | M1.5 | `infra/hdfs/{compose.yaml,conf/,bin/}` | 集群环境即代码 | — |
 | M1.5 | `collect/inject/*.sh`（4 类 + restore） | 故障注入与恢复 | `infra/hdfs` |
 | M1.5 | `collect/labels.py` | 注入前后自动写 `labels.fault_injection`（**只写这一块**，`root_cause` 仍人工） | `store/casepack.py` |
@@ -393,10 +395,10 @@ data/cases/<case_id>/
 
 | # | 风险 | 应对 |
 |---|---|---|
-| A-R1 | Hadoop 镜像把日志写文件而 stdout 为空，`docker logs` 采不到东西 | 先跑 `docker exec cat` 验证（§6.1），两种取数都实现 |
+| A-R1 | Hadoop 镜像把日志写文件而 stdout 为空，`docker logs` 采不到东西 | **已落地**：docker 只走"远端文件系统"一条路（§6.1），stdout 由 §2 的 `tee` 落成文件；`O7` 闭环 |
 | A-R2 | 容器内 TZ 与日志 TZ 不一致，`ts` 错 8 小时 | 统一 `TZ=UTC`；A2 解析后与 `window` 做断言（超出窗口 ±1min 直接报错） |
 | A-R3 | `DN_HEARTBEAT` 采不到 dead 判定（默认 10.5 min） | 调 `heartbeat.recheck.interval=60s` 并**写进 manifest.config_overrides** |
-| A-R4 | 132 例里有 `parse_status=failed` 的行，新解析器救回 → 差异 | 逐条白名单（`verify_collect.py --whitelist`），白名单外必须修；白名单本身要写进 PR 说明，不能只留在代码里 |
+| A-R4 | 132 例里有 `parse_status=failed` 的行，新解析器救回 → 差异 | **没有白名单**：V2 的差异一律红，解释清楚之后 `--update-baseline` 重新冻结，基准文件的 diff 就是审计记录（写进 PR 说明） |
 | A-R5 | 日志滚动（`hadoop-*.log.1`）导致 offset 失效 | checkpoint 记 `inode`，inode 变了就从头读并向 manifest 记 `rotated: true` |
 | A-R6 | tmpfs 卷满后容器内其他写操作（如日志本身）也被影响 | dn1 的 tmpfs 只挂数据目录，`logs/` 走 bind mount 到宿主机 |
 | A-R7 | 采集中途 `docker compose down` 导致部分源丢数据 | 每源独立 checkpoint + 流式追加；manifest 未写 = 未完成 |
@@ -415,6 +417,7 @@ data/cases/<case_id>/
 | **O4** | 是否采 1 例 `DEBUG` 对照 | 采 / 不采 | **采 1 例**：证明"日志量 ×20 时采集器不炸"，也证明我们没为了好处理而限制输入 |
 | **O5** | S1 内采 3 例够不够 | 3 / 6 / 12 | **3**：S1 求"管线通"，数据集在 S6 前补齐（§3.4） |
 | **O6** | 指纹拆分（§6.4）是否采纳 | — | **已闭环**：总计划 v1.0 §4.1 已直接写成两个哈希，无需再拍板；本文只留定义 |
+| **O7** | docker adapter 是否实现 `docker logs --since` 取 stdout | 实现 / 不实现 | **已闭环：不实现**。它给不出字节偏移，续采必猜，V3 失守；stdout 改由 §2 的 `tee` 落盘，复用同一条 `tail -c` 语义（一进 §6.1、A-R1） |
 
 ---
 
@@ -433,5 +436,6 @@ data/cases/<case_id>/
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.3 | 2026-11-22 | 实现回填（第 9 / 11 / 12 步）：§6.1 docker adapter 改成"把容器当远端文件系统、只用 `tail -c` 一套 offset 语义"，**不实现 `docker logs --since`**，stdout 改由 §2 的 `tee` 落盘（O7 闭环）。V6 收紧为"只对 `origin=collected` 成立"（迁移的 132 例里 104 例根本没有 ERROR），并补一段说明。V2 改成"独立第二实现 + `tests/fixtures/verify/baseline.json` 冻结基准"，差异白名单取消（A-R4 改为重新冻结基准并在提交里露 diff）。§8.2 M1.4 补 `store/verify.py` 与基准文件；A-R1 标已落地 |
 | v0.2 | 2026-11-22 | 对齐总计划 v1.0：引用改指 §4.1 / §5 / §7 / §8.2，路径补 `apps/backend/src/logcopilot/` 前缀，补 M0.x 前置表。CasePack 读写归 `store/casepack.py`（并入原 `collect/pack.py` 与 `collect/manifest.py`）。`LogRecord` 定死 10 字段：`id = {component}:{line_no:05d}`、`ts` 用 `+00:00`、新增 `logger`、`raw` 仅非 ok 出现。canonical 拆 `hdfs_log4j` / `lab` 两个 profile，按实测语法 A/B 与"续行也带前缀"重写判据。redact 要求对已有占位符幂等。`canonical_sha256` 只覆盖 canonical 投影（排除 `source`/`raw`），排序键改 `(ts, id)`，新增 `finalize` 阶段。`pipeline_version` / `redact_policy.version` / `canonical_profile` 明确不入任何哈希。V2 改用独立 oracle + 冻结 fixture，新增 V9（两种旧语法），命令改 `CASE=`/`CHECK=`。`window.phases` 与 `fault_injection` 可空并给出反推规则；O6 标记闭环 |
 | v0.1 | 2026-11-22 | 首版。定下：只采 HDFS 生态（NN/DN/audit/GC/stdout + 指标）；docker compose 1NN+3DN、`TZ=UTC`、`dfs.replication=2`；采集端不过滤 level、FATAL 不伪造；三段窗口（baseline/fault/recovery）；S1 只采 3 例；指纹拆成 `input_fingerprint` + `canonical_sha256` |
