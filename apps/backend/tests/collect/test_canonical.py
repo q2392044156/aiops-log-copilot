@@ -392,3 +392,34 @@ def test_since_must_be_utc() -> None:
 def test_ts_is_always_utc() -> None:
     for record in run("lab_syntax_a.log").records:
         assert record.ts.utcoffset() == timedelta(0)
+
+
+def test_blank_lines_are_skipped_but_counted() -> None:
+    """纯空行不是记录，但 raw_line_count 必须把它数进去。
+
+    132 例里有一例的首行就是空行：修这条之前，它被当成"孤儿续行"造出一条
+    raw="" 的 failed 记录，而 LogRecord 硬性要求 failed 必须带原文 ——
+    迁移在这一例上直接崩了。
+    """
+    result = run_lines([""], profile=CanonicalProfile.HDFS_LOG4J, since=SINCE_HDFS)
+
+    assert result.records == ()
+    assert result.raw_line_count == 1
+
+
+def test_blank_line_does_not_break_the_group_above() -> None:
+    result = run_lines(
+        [
+            "2026-11-22 10:03:11,482 ERROR DataNode:1201 - Disk failure",
+            "",
+            "2026-11-22 10:03:12,000 INFO DataNode:1201 - recovered",
+        ],
+        profile=CanonicalProfile.HDFS_LOG4J,
+        since=SINCE_HDFS,
+    )
+
+    assert [(record.id, str(record.level)) for record in result.records] == [
+        ("dn1:00001", "ERROR"),
+        ("dn1:00003", "INFO"),
+    ]
+    assert result.raw_line_count == 3

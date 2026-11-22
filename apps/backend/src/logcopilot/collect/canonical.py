@@ -301,8 +301,16 @@ def canonicalize(
             comp = component
             body = line
 
+        if not body.strip():
+            # 纯空行（或只含空格的行）不是记录，是排版。
+            # 但 raw_line_count 已经数过它了 —— 文件里确实存在这一行，
+            # 计数少一行会让 counters 与 `wc -l` 对不上。
+            # 真跑 132 例时就是这里炸的：某个 case 的首行是空行，
+            # 它被当成"孤儿续行"造出一条 raw="" 的 failed 记录，
+            # 而 LogRecord 要求 failed 必须带原文。
+            continue
+
         if comp is None:
-            # 前缀认不出组件。不猜：整行进 failed，原文留 raw。
             groups.append(
                 _Group(
                     line_no=line_no,

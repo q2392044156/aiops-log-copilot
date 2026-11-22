@@ -41,6 +41,7 @@ from logcopilot.domain.case import (
     Counters,
     Hashes,
     Labels,
+    OriginKind,
     SourceRef,
     Window,
 )
@@ -627,6 +628,13 @@ def audit_levels(paths: CasePackPaths, manifest: CaseManifest, labels: Labels) -
     """
     problems: list[str] = []
     error_count = manifest.counters.by_level.get(str(LogLevel.ERROR), 0)
+
+    # 迁移例不适用 V5/V6：这两条问的是"这次采集采到了没有"，而迁移例的内容
+    # 由上游决定 —— 旧数据里 104/132 例根本没有 ERROR 行（心跳/网络/安全模式
+    # 三族的日志只到 WARN），22 例的日志在 fault_start 之前就结束了。
+    # 拿它们卡 V6 只会逼人去反填 expect，那是把校验变成自证。
+    if manifest.origin.kind is OriginKind.MIGRATED:
+        return problems
 
     if labels.root_cause is None:
         # V5：正常例。这条不需要人填 expect 就该成立。
