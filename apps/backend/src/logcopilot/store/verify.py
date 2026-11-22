@@ -274,9 +274,11 @@ def save_baseline(path: Path, fingerprints: Iterable[PackFingerprint]) -> int:
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    # `newline="\n"` 不是小事：默认文本模式在 Windows 上会把换行翻成 CRLF，
+    # 于是同一个基准在不同机器上字节不同，每次提交都冒一条 CRLF 警告。
+    with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        handle.write("\n")
     tmp.replace(path)
     return len(ordered)
 
