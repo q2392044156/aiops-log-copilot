@@ -91,11 +91,14 @@ class ParseStatus(StrEnum):
 _E = TypeVar("_E", bound=StrEnum)
 
 
-def _coerce(enum_cls: type[_E], value: str | _E, field_name: str) -> _E:
+def coerce_enum(enum_cls: type[_E], value: str | _E, field_name: str) -> _E:
     """把字符串收进枚举闭集；非法值抛出带闭集的错误信息。
 
     `LogRecord(level="WARNING")` 会在构造时失败，而不是等到写进 CasePack
     之后在 P-B 建索引时才炸。
+
+    公开（不带下划线）是因为 `domain/case.py` 也要用同一套规则 —— 闭集校验
+    只能有一份实现，两份迟早会不一致。
     """
     if isinstance(value, enum_cls):
         return value
@@ -106,7 +109,7 @@ def _coerce(enum_cls: type[_E], value: str | _E, field_name: str) -> _E:
         raise ValueError(f"{field_name} 非法: {value!r}，闭集={allowed}") from None
 
 
-def _format_ts(ts: datetime) -> str:
+def format_ts(ts: datetime) -> str:
     """统一输出 ISO 8601 + `+00:00`（不写 `Z`，P-A §5）。
 
     微秒恰好是整毫秒时用毫秒精度（正常日志都是这种），否则保留微秒，
@@ -114,6 +117,28 @@ def _format_ts(ts: datetime) -> str:
     """
     timespec = "milliseconds" if ts.microsecond % 1000 == 0 else "microseconds"
     return ts.isoformat(timespec=timespec)
+
+
+def require_utc(value: datetime, field_name: str = "ts") -> datetime:
+    """校验并原样返回一个 UTC 时间；naive 或带其它偏移都抛 ``ValueError``。
+
+    抽成函数是因为 `manifest.created_at`、`window.since/until`、
+    `labels.fault_injection.started` 全都要过同一道关。差 8 小时（A-R2）这种
+    事故只要有一条路径漏了，整条时间轴就废了。
+    """
+    if not isinstance(value, datetime):
+        raise ValueError(f"{field_name} 必须是 datetime，拿到 {type(value).__name__}")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(
+            f"{field_name} 必须带时区 —— naive 时间等于把 UTC 当本地时间，"
+            "整条时间轴会差 8 小时（A-R2）"
+        )
+    if value.utcoffset() != timedelta(0):
+        raise ValueError(
+            f"{field_name} 必须是 UTC，拿到 offset={value.utcoffset()}"
+            " —— 带偏移的时间戳说明上游没做归一，先修 canonical 层"
+        )
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,9 +173,9 @@ class LogRecord:
 
     def __post_init__(self) -> None:
         # frozen 的 dataclass 不能直接赋值，归一化结果用 object.__setattr__ 写回。
-        object.__setattr__(self, "level", _coerce(LogLevel, self.level, "level"))
+        object.__setattr__(self, "level", coerce_enum(LogLevel, self.level, "level"))
         object.__setattr__(
-            self, "parse_status", _coerce(ParseStatus, self.parse_status, "parse_status")
+            self, "parse_status", coerce_enum(ParseStatus, self.parse_status, "parse_status")
         )
 
         if self.component not in COMPONENTS:
@@ -167,17 +192,9 @@ class LogRecord:
                 " —— 两者存了同一件事，必须在构造时就锁死"
             )
 
-        if not isinstance(self.ts, datetime):
-            raise ValueError(f"ts 必须是 datetime，拿到 {type(self.ts).__name__}")
-        if self.ts.tzinfo is None or self.ts.utcoffset() is None:
-            raise ValueError(
-                "ts 必须带时区 —— naive 时间等于把 UTC 当本地时间，整条时间轴会差 8 小时（A-R2）"
-            )
-        if self.ts.utcoffset() != timedelta(0):
-            raise ValueError(
-                f"ts 必须是 UTC，拿到 offset={self.ts.utcoffset()}"
-                " —— 带偏移的时间戳说明上游没做归一，先修 canonical 层"
-            )
+        # 时间戳是整条 P-A 里最容易错的地方：naive、本地时区、`Z` 与 `+00:00`
+        # 混用，三种都会让"跨源按 ts 排序"安安静静地排错。统一交给 require_utc。
+        require_utc(self.ts)
 
         if not self.source:
             raise ValueError("source 不能为空（如 'file:nn' / 'docker:dn2'）")
@@ -219,7 +236,7 @@ class LogRecord:
     def canonical_payload(self) -> dict[str, Any]:
         """canonical_sha256 的输入：只有 6 个字段。
 
-        第 3 步 `store/casepack.py` 会把它按行 json 化后 sha256；
+        第 4 步 `store/casepack.py` 会把它按行 json 化后 sha256；
         现在先把这个"哪些字段算内容"的决定固化下来。
         """
         data = self.to_dict()
@@ -231,7 +248,7 @@ class LogRecord:
         """按 `FIELDS` 的顺序转成可 json 化的 dict（ts 转字符串）。"""
         return {
             "id": self.id,
-            "ts": _format_ts(self.ts),
+            "ts": format_ts(self.ts),
             "level": str(self.level),
             "component": self.component,
             "logger": self.logger,
