@@ -1,0 +1,4 @@
+# CasePack 的落地目录。
+# 每个 case 一个子目录，结构见 P-A_COLLECT_PLAN.md §5：
+#   data/cases/<case_id>/{manifest.json, logs.jsonl, metrics.jsonl, labels.json, anchors/}
+# .gitignore 里把 data/cases/* 全忽略、只放行本文件 —— 采集产物体积大且可重采，不进 git。

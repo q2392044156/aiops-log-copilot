@@ -34,5 +34,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 include = ["src", "tests"]
 extraPaths = ["src"]
 typeCheckingMode = "standard"
-# pyright 不装进 dev 依赖（它是 node 包装器，装起来慢）；
-# 第 2 步的 Makefile 里用 `uvx pyright` 调起来即可。
+# 告诉 pyright 用 uv 建的这个虚拟环境去解析 pytest 等第三方包
+venvPath = "."
+venv = ".venv"
+# pyright 不装进 dev 依赖（那是 node 包装器）；第 2 步的 Makefile 用 `make type` 调它。
