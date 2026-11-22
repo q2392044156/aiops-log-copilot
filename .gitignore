@@ -30,3 +30,4 @@ infra/hdfs/data/
 .idea/
 .DS_Store
 Thumbs.db
+.git-msg.tmp
