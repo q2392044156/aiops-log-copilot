@@ -25,7 +25,7 @@ help:
 	@echo   lint            ruff 静态检查 + 格式检查（只查不改）
 	@echo   fmt             ruff 格式化 + 自动修可修的 lint 问题（会改文件）
 	@echo   type            pyright 类型检查（首次运行要下一份 node，较慢）
-	@echo   test            pytest（当前 228 条契约测试）
+	@echo   test            pytest（当前 255 条契约测试）
 	@echo   pack-lint       校验 CasePack：make pack-lint CASE=inc_dnvol_01 CHECK=levels
 	@echo   verify-collect  132/132 一致性核验（第 11 步才有脚本）
 	@echo   ask             命令行问答入口（第 9 步才有脚本）

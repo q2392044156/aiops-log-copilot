@@ -40,7 +40,13 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from logcopilot.collect.adapters.base import CheckpointMismatch, StreamSpec, line_sha1
+from logcopilot.collect.adapters.base import (
+    AmbiguousStream,
+    CheckpointMismatch,
+    StreamSpec,
+    decode_line,
+    line_sha1,
+)
 from logcopilot.domain.case import Adapter, AdapterState
 
 __all__ = [
@@ -50,15 +56,6 @@ __all__ = [
     "FileStream",
     "hdfs_streams",
 ]
-
-
-class AmbiguousStream(ValueError):
-    """一个 glob 匹配到多个文件 —— 不知道该读哪个。
-
-    典型原因：轮转留下了 `datanode.log` 和 `datanode.log.1`，而 pattern 写成了
-    `datanode.log*`。这种情况必须显式失败：随便挑一个读，会让 pack 里混进
-    两代日志，`id` 空间也会乱。真想读归档，就为它单独声明一条 `FileStream`。
-    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,7 +187,7 @@ class FileReader:
                 if not raw.endswith(b"\n"):
                     # 半行：可能是正在写的最后一行，不消费、不推进 offset
                     return
-                text = _decode_line(raw)
+                text = decode_line(raw)
                 self._offset += len(raw)
                 self._line_no += 1
                 self._tail = line_sha1(text)
@@ -219,20 +216,7 @@ class FileReader:
         if not chunk:
             return line_sha1("")
         cut = chunk.rfind(b"\n")
-        return line_sha1(_decode_line(chunk[cut + 1 :] + b"\n"))
-
-
-def _decode_line(raw: bytes) -> str:
-    """一行字节 → 文本。
-
-    三件事一起做，顺序不能换：
-      1. 去掉行尾 `\\n`
-      2. 去掉行尾 `\\r`（Windows 写出来的日志、或 bind mount 走了 CRLF 转换）
-      3. `errors="replace"`：日志里混进非 UTF-8 字节是常态（GBK 的中文、
-         二进制块名），这里宁可留一个 `\ufffd` 也不让整次采集崩掉。
-    """
-    body = raw[:-1] if raw.endswith(b"\n") else raw
-    return body.decode("utf-8", "replace").rstrip("\r")
+        return line_sha1(decode_line(chunk[cut + 1 :] + b"\n"))
 
 
 class FileAdapter:

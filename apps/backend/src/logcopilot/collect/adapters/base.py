@@ -41,6 +41,7 @@ from logcopilot.domain.case import Adapter, AdapterState
 from logcopilot.domain.log import COMPONENTS
 
 __all__ = [
+    "AmbiguousStream",
     "CheckpointMismatch",
     "ComponentReader",
     "LineAllocator",
@@ -48,6 +49,7 @@ __all__ = [
     "SourceAdapter",
     "StreamReader",
     "StreamSpec",
+    "decode_line",
     "line_sha1",
 ]
 
@@ -55,6 +57,35 @@ __all__ = [
 #: 行号是 **1 起的连续整数**，由 `LineAllocator` 分配 —— 注意它不等于
 #: 文件里的第几行（一个组件有多份文件时，行号跨文件连续）。
 RawLine = tuple[int, str]
+
+#: 读日志时统一用这一套解码规则。放在 base 是因为 **file 与 docker 必须
+#: 用同一份实现**：两条路径各写一遍 `decode()`，迟早会在 CR 或非法字节上
+#: 分叉，V4（两条路径哈希相等）就会莫名其妙地红。
+_DECODE_ERRORS = "replace"
+
+
+class AmbiguousStream(ValueError):
+    """一个声明匹配到多个文件 —— 不知道该读哪个。
+
+    典型原因：轮转留下了 `datanode.log` 和 `datanode.log.1`，而 pattern 写成了
+    `datanode.log*`。这种情况必须显式失败：随便挑一个读，会让 pack 里混进
+    两代日志，`id` 空间也会乱。真想读归档，就为它单独声明一条流。
+
+    它是**布局层**的错误，与"文件在本机还是容器里"无关，所以放在 base。
+    """
+
+
+def decode_line(raw: bytes) -> str:
+    """一行字节 → 文本。file / docker 两个适配器共用，保证解出来一模一样。
+
+    三件事一起做，顺序不能换：
+      1. 去掉行尾 `\\n`
+      2. 去掉行尾 `\\r`（Windows 写的日志，或 bind mount 被 CRLF 转换过）
+      3. `errors="replace"`：日志里混非 UTF-8 字节是常态（GBK 中文、二进制
+         块名），宁可留一个 `\\ufffd`，也不让一次采集整体崩掉。
+    """
+    body = raw[:-1] if raw.endswith(b"\n") else raw
+    return body.decode("utf-8", _DECODE_ERRORS).rstrip("\r")
 
 
 class CheckpointMismatch(RuntimeError):
