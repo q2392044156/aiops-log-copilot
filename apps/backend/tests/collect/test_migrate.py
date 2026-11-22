@@ -204,6 +204,21 @@ def test_discover_uses_registry_and_marks_source(old_root: Path) -> None:
     }
 
 
+def test_source_ref_is_relative_to_the_old_project_root(old_root: Path) -> None:
+    """`source.ref` 会进 input_fingerprint，所以不能带本机绝对路径。
+
+    同一份旧数据放在 `D:\\lab` 或 `E:\\project\\...`，指纹必须一样 —— 指纹回答的是
+    "数据变了没有"，不是"它躺在哪个盘"。
+    """
+    cases = discover_legacy_cases(old_root)
+
+    case = next(c for c in cases if c.case_id == "inc_dock_01")
+    assert case.rel_log_path == (
+        "ops/lab/real_batch_cases/inc_dock_01/evidence/logs/inc_dock_01.log"
+    )
+    assert str(old_root).replace("\\", "/") not in case.rel_log_path
+
+
 def test_discover_ignores_dirs_outside_registry(old_root: Path) -> None:
     """旧目录里有 197 个子目录，只有 registry 里的 132 个算数。"""
     _write_case(old_root, "inc_extra_99", group="ops/lab/real_batch_cases", log_text=LOG_DOCKER)

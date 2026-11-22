@@ -184,8 +184,14 @@ def _sha256_text(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def load_legacy_case(case_dir: Path, *, source: str) -> LegacyCase:
-    """读一个旧病例目录：`incident.json` + 唯一那份 `.log`。"""
+def load_legacy_case(case_dir: Path, *, source: str, old_root: Path | None = None) -> LegacyCase:
+    """读一个旧病例目录：`incident.json` + 唯一那份 `.log`。
+
+    给了 `old_root` 就把日志路径记成**相对旧项目根**的形式：`source.ref` 会进
+    `input_fingerprint`，若写成绝对路径，同一份数据换台机器（旧项目放在
+    `D:\\lab` 而不是 `E:\\project\\...`）算出来的指纹就完全不同 —— 指纹要回答的
+    是"数据变了没有"，不是"它躺哪个盘"。
+    """
     incident_path = case_dir / "incident.json"
     if not incident_path.is_file():
         raise MigrationError(f"{case_dir} 下没有 incident.json")
@@ -207,11 +213,16 @@ def load_legacy_case(case_dir: Path, *, source: str) -> LegacyCase:
     upstream = refs[0].get("content_sha256") if refs else None
     stamps = data.get("timestamps") or {}
 
+    rel_log_path = logs[0]
+    if old_root is not None:
+        # 只在这里转相对；测试里直接调 load_legacy_case 时可省掉 old_root。
+        rel_log_path = rel_log_path.relative_to(old_root)
+
     return LegacyCase(
         case_id=str(data["incident_id"]),
         source=source,
         group=case_dir.parent.name,
-        rel_log_path=str(logs[0]).replace("\\", "/"),
+        rel_log_path=rel_log_path.as_posix(),
         root_cause=(data.get("labels") or {}).get("root_cause_code"),
         fault_start=_parse_ts(stamps.get("fault_start")),
         recovered=_parse_ts(stamps.get("recovered")),
@@ -245,7 +256,8 @@ def discover_legacy_cases(
         raise MigrationError(f"registry 里有 {len(missing)} 例找不到目录，前几个: {missing[:5]}")
 
     return [
-        load_legacy_case(located[case_id][0], source=wanted[case_id]) for case_id in sorted(located)
+        load_legacy_case(located[case_id][0], source=wanted[case_id], old_root=old_root)
+        for case_id in sorted(located)
     ]
 
 
