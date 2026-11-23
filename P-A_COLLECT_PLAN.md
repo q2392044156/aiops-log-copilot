@@ -1,6 +1,6 @@
 # P-A 采集流水线 · 实现计划
 
-> **版本**：v0.9（2026-11-23）—— **结项版**：P-A 的代码线已全部落地，本文此后只做"事实回填"
+> **版本**：v0.10（2026-11-23）—— **结项版**：P-A 的代码线已全部落地，本文此后只做"事实回填"
 > **上游文档**：`IMPLEMENTATION_PLAN.md` v1.0 的 §4.1（P-A 段落）/ §5（CasePack 契约与目录形状）/ §7（S1 里程碑）/ §8.2（红线）
 > **本文边界**：只讲 **P-A（采集）** 这一段——采什么日志、用什么环境采、采哪些等级与窗口、A1/A2/A3 各做什么、怎么验收。
 > **不管**：窗口切分 / 模板 / 门禁 / 事件合并（那是旧项目已有的检测侧，新项目不复现）、检索与诊断（P-B / P-C）。
@@ -14,10 +14,10 @@
 | 维度 | 现状（2026-11-23 实测） |
 |---|---|
 | 代码 | 源码 + 脚本约 **9300 行**，18 个测试文件、**480 条用例**全绿；`ruff` / `pyright` 0 问题 |
-| 产物 | `data/cases/` 下 **155 个完整 pack**：**132 例迁移**（`origin=migrated`，旧实验台）+ **23 例真采**（`origin=collected`，本仓库集群；22 例矩阵 + 安全模式补采的 1 例） |
-| 闸门 | `pack-lint` 155/155、`verify-collect` 132/132（23 例新采不参与比对）、`verify-gates` V3/V4/V7 全通过（V7 现场还查副本是否补齐） |
+| 产物 | `data/cases/` 下 **156 个完整 pack**：**132 例迁移**（`origin=migrated`，旧实验台）+ **24 例真采**（`origin=collected`，本仓库集群；22 例矩阵 + 安全模式补采 1 例 + DEBUG 对照 1 例） |
+| 闸门 | `pack-lint` 156/156、`verify-collect` 132/132（24 例新采不参与比对）、`verify-gates` V3/V4/V7 全通过（V7 现场还查副本是否补齐） |
 | 环境 | `infra/hdfs/` 一套 1NN+3DN 即代码；`make collect` 一条命令出 pack，9–14 分钟一例（2+5+2 或 2+10+2） |
-| 未做 | ①`NN_SAFE_MODE` 只有**客户端**证据（`inc_safemode_05`：113 条 `FsShell` WARN），服务端 0 非 INFO —— 见 O10 / O12 / O13；②`edits 满` 型安全模式没做；③`anchors` 只有新采例有指针，迁移例没有（指向旧项目路径，换 clone 即悬空）；④`O4` 的 DEBUG 对照例没采 |
+| 未做 | ①`NN_SAFE_MODE` 只有**客户端**证据（`inc_safemode_05`：113 条 `FsShell` WARN），服务端 0 非 INFO —— 见 O10 / O12 / O13；②`edits 满` 型安全模式没做；③`anchors` 只有新采例有指针，迁移例没有（指向旧项目路径，换 clone 即悬空） |
 | 复现 | `make install && make check`（lint + 480 条 + pack-lint + verify-collect）→ `make verify-gates ARGS="--v7 --live"`（要集群在跑） |
 
 ---
@@ -158,15 +158,17 @@ T-5min ────────── T0 ─────────────
 
 > 关于心跳：HDFS 默认 `heartbeat.interval=3s`、`recheck.interval=5min` → 判 dead 约需 `2*300+10*3=630s ≈ 10.5min`。**`DN_HEARTBEAT` 若只采 10 分钟，很可能采不到 dead 判定**。两个办法：①该例窗口拉到 15 min；②在 `conf/hdfs-site.xml` 把 `heartbeat.recheck.interval` 调到 `60s` 加速（**推荐 ②，并在 manifest 记 `config_overrides`**，否则面试时会被问"你是不是改了参数才造出故障"）。这一条是本计划里最容易踩的坑。
 
-### 3.4 采集矩阵：22 例 + 安全模式补采 1 例（v0.9 回填）
+### 3.4 采集矩阵：22 例 + 安全模式补采 1 例 + DEBUG 对照 1 例（v0.10 回填）
 
 > v0.1 写的是 12 例，v0.6 按实测改成 22 例矩阵 —— 加列的每一例都对应"某个变体在日志里的表现不一样"，不是凑数。
 > v0.8 真采到 22 例（`origin=collected`），其中 `NN_SAFE_MODE` 的四个槽位四次尝试全部 0 证据，被移到 `runtime/no-evidence/`，由"多打几遍其余三族"补齐。
 > **v0.9 变了**：修掉 O12（客户端失败行被续行吞掉）之后，第五次试 `inc_safemode_05` 终于有证据了 —— 服务端仍然 0 条非 INFO，但客户端 `FsShell` 打出 **113 条 WARN**（其中 57 条明写 `Name node is in safe mode`），于是这一族不再是"零证据"，而是"**证据只在客户端**"。采集矩阵因此变成 **23 例**（22 + 这次补采）。
+> **v0.10 补上 O4 的 DEBUG 对照例**：`base_healthy_debug_01` 把 root level 调到 DEBUG 采了 2 分钟 —— 同一份代码、同一个窗口长度下，记录数从 `base_healthy_01` 的 **1590/5 分钟**（318 条/分）涨到 **10638/2 分钟**（5319 条/分），**约 16.7 倍**，`parse_failed` 硬失败 0 条、1162 条 `partial`（全是 Java 栈被正确并进上一条）。它证明的不是"能读"，而是"**日志量涨一个数量级时采集器不炸、解析不退化**"。
 
 | 族 | ID | 注入变体（`collect/inject.py` 的键） | 实测（记录数 / ERROR / WARN） |
 |---|---|---|---|
 | 正常 | `base_healthy_01/02/03` | 无注入 + 读写负载（空载集群不写日志，healthy 例必须有负载） | 1590 / 641 / 1669，**ERROR 全 0** |
+| 正常 | `base_healthy_debug_01` | 无注入，`HADOOP_ROOT_LOGGER=DEBUG,RFA`（**O4 对照例**） | 10638（DEBUG 9949 / INFO 682 / WARN 7），**ERROR 0**；`config_overrides={"log_level":"DEBUG"}` |
 | 正常 | `base_noise_01/02` | 良性扰动：窗口内 `docker restart` 一台 DN；负载尖峰再整体停 | 147 / 1127，**ERROR 全 0**（"重启不等于故障"，V5 的分母） |
 | 卷 | `inc_dnvol_01/04/05` | `dn_volume`：dn1 的 2g tmpfs 写满 4g（fault 5 / 8 / 10 分钟） | 3200 / 4430 / 5306，**ERROR 全 0**，证据全在 WARN（`Failed to place enough replicas`） |
 | 卷 | `inc_dnvol_02/03` | `dn_disk_broken`：卷里的 `current` 换成普通文件后重启（dn2 / dn3） | 335（**ERROR=1**）/ 2998（**ERROR=7**），`Initialization failed for Block pool` |
@@ -422,7 +424,7 @@ data/cases/<case_id>/
 | V2 | `make verify-collect` | **132/132 一致**（23 例新采不参与比对：时间戳每次采集都变，冻进基准等于把"重采一次"变成回归失败） |
 | V3 | `make verify-gates ARGS="--v3 A B"` | 通过（同一批起点、一次采完 vs 中断后 attach，内容多重集合与 counters 全等） |
 | V4 | `make verify-gates ARGS="--v4"` | 通过：nn/dn1/dn2/dn3 四条主流**逐字节相同**（各 64 KiB 区间比对） |
-| V5 | `make pack-lint CASE=base_healthy_01 CHECK=levels` | 通过（`ERROR == 0`）；负样本 `base_noise_01/02`（窗口内重启 dn3、负载尖峰）同样 `ERROR == 0` |
+| V5 | `make pack-lint CASE=base_healthy_01 CHECK=levels` | 通过（`ERROR == 0`）；负样本 `base_noise_01/02`（窗口内重启 dn3、负载尖峰）同样 `ERROR == 0`；**O4 的 DEBUG 对照例 `base_healthy_debug_01` 也通过**（10638 条、ERROR 0、硬失败 0） |
 | V6 | `make pack-lint CASE=<每例> CHECK=levels` | **23 例逐例通过**：`inc_dnvol_02`（E1）、`inc_dnvol_03`（E7）、`inc_hb_0x`（E2–E4）、`inc_net_0x`（E2–E3）、`inc_dnvol_01/04/05`（E0，走 WARN 证据）、`inc_safemode_05`（E0，客户端 `FsShell` 的 113 条 WARN） |
 | V7 | `make verify-gates ARGS="--v7 --live"` | 通过（容器 4 个在跑、安全模式 OFF、Live DN=3、无 `lab.fill` 残留、`Under-replicated`/`Missing` 块均为 0） |
 | V8 | 同上（`counters.redacted`） | 通过（新采例 `ip`/`path` 两类 > 0；迁移例命中已有占位符为 0，不算失败） |
@@ -531,7 +533,7 @@ data/cases/<case_id>/
 | **O1** | 是否采 HDFS 审计日志 | **已定：采**。`hdfs-audit.log` 是 NN 的第 2 条流（`file.py::hdfs_streams` order=1），也是 canonical 里唯一非 log4j 的语法；`log4j.properties` 给审计 logger 单独 appender 且 `additivity=false`，否则同一行进两条流 |
 | **O2** | DN 数量 | **已定：3**（`alcp-dn1..3`）。v0.4 起 `dfs.replication=3`，四类故障都能造 |
 | **O3** | 日志时区 | **已定：UTC**。容器 `TZ=UTC` + `%d{ISO8601}`；迁移的 WSL 51 例在 migrate 里按来源 −8h 平移到 UTC |
-| **O4** | 是否采 1 例 `DEBUG` 对照 | **未做**：`log4j.properties` 现在是 `rootLogger=INFO`。要做就在补样本矩阵时加一例（把它记进 `manifest.config_overrides`，否则同一批语料的 level 分布没法横向比） |
+| **O4** | 是否采 1 例 `DEBUG` 对照 | **已做（v0.10）**：`log4j.properties` 的 root level 改成 `${hadoop.root.logger}`，compose 用 `HADOOP_ROOT_LOGGER`（默认 `INFO,RFA`）切换。采了 `base_healthy_debug_01`：2 分钟 10638 条，比 INFO 档的 `base_healthy_01` 高 **16.7 倍**，`parse_failed` 硬失败 0、partial 1162 条（Java 栈被正确归并），`config_overrides={"log_level":"DEBUG"}` 记进 manifest |
 | **O5** | S1 内采 3 例够不够 | **已定并超出：6 例**（`base_healthy_01/02`、`inc_dnvol_01/02`、`inc_net_02`、`inc_hb_01`）。剩余 16 例见 §3.4 的 22 例矩阵 |
 
 | # | 决策点 | 选项 | 我的建议 |
@@ -567,6 +569,7 @@ data/cases/<case_id>/
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.10 | 2026-11-23 | **补 O4 的 DEBUG 对照例**：①`log4j.properties` 的 root level 从硬编码 `INFO, RFA` 改成 `${hadoop.root.logger}`，compose 每个 service 加 `HADOOP_ROOT_LOGGER: "${HADOOP_ROOT_LOGGER:-INFO,RFA}"` —— 采对照例时 `$env:HADOOP_ROOT_LOGGER="DEBUG,RFA"; docker compose up -d`，采完 up 回默认，**不动仓库文件**；②`Collector` 新增 `config_overrides`，`scripts/collect_case.py` 新增 `--config-override KEY=VALUE`（严格拒绝无等号/空键/重复键），保证"这一例现场不同"能被事后解释；③采 `base_healthy_debug_01`（2 分钟）：10638 条（DEBUG 9949 / INFO 682 / WARN 7）、原始 15764 行、硬失败 0 条、partial 1162 条（Java 栈正确归并）、窗口外丢弃 170、`pack-lint` PASS；**同一份代码下比 INFO 档快 16.7 倍**（318 → 5319 条/分）；④`describe` 输出把"解析异常（partial+failed）"与"硬失败（failed）"分开报，避免 DEBUG 档下把正常的栈归并误读成解析器坏了；⑤§0/§3.4/§7.1 V5/§10 O4 回填（156 pack / 24 例真采） |
 | v0.9 | 2026-11-23 | **收口 1~7**：①修 O12（`FsShell` 失败行单独成条，级别 WARN、`parse_status=partial`、只对 `hdfs_log4j` 生效），132 个迁移 pack 的 `canonical_sha256` 一个字节没变；②据此补采 `inc_safemode_05`，`NN_SAFE_MODE` 从"零证据"变成"证据只在客户端"（113 条 `FsShell` WARN / 57 条明写 safe mode），O10 改判、新增 **O13**（这批行的 `ts` 是继承的，`phase_map` 不可信）；③落地 `ports.py`（`Clock` / `CaseStore`）+ `store/casestore.py`，`AnchorRef` 上移到 `domain/case.py`；④`pack_paths` 现在校验 `case_id`（`../etc` 在第一层就被拒）；⑤`adapters/wsl.py` 落成骨架（构造即失败），§6.1 / §8.3 对齐；⑥新增 `make check` / `make check-live` 一条命令跑全闸门；⑦`verify-gates --v7 --live` 增加 `Under-replicated` / `Missing` 块检查与 `--repair`（`fsck -delete`），并修掉"报告行有制表符前缀导致永远读 0"的假绿。§0 计数回填（155 pack / 23 例真采 / 480 条用例） |
 | v0.8 | 2026-11-23 | **矩阵采满 22 例**：§3.4 重写成实测表（每族的 ID、注入变体、记录数 / ERROR / WARN），补 `inc_dnvol_03/04/05`、`inc_hb_03/04/05/06`、`inc_net_03/04/05/06`、`base_healthy_03`、`base_noise_02`；`NN_SAFE_MODE` 第四次尝试仍无判别证据（块缺失背景 + 安全模式，1826 条全是噪声 WARN），四例全部留 `runtime/no-evidence/`，**缺的 4 个槽位改由其余三族多采变体补齐**（理由写进 §3.4）。§0 计数回填（154 pack / 22 例真采 / 闸门 154-154、132-132）；§7.1 V6 改成"22 例逐例通过"；§11 接口表更正为 22 例 |
 | v0.7 | 2026-11-23 | **补样本到 9 例**：`inc_net_01`（disconnect dn3）、`inc_hb_02`（stop dn2）、`base_noise_01`（无负载 + 窗口内重启 dn3 的负样本，`ERROR=0`）三例入 `data/cases/`，安全模式第二例 `inc_safemode_02`（带负载 5 分钟）**仍然 0 条真 WARN**、移到 `runtime/no-evidence/`。新增 O12（客户端 FsShell 纯文本错误被续行吞掉，level 分布结构性看不见）；O10 补第二次实测；§3.4 矩阵、§7.1 实况、§0 计数（141 pack / 9 例真采）回填 |

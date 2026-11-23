@@ -31,6 +31,11 @@ services:
       TZ: "UTC"
       HADOOP_HEAPSIZE: "512"
       HADOOP_LOG_DIR: /opt/hadoop/logs
+      # root level 默认 INFO,RFA。采 O4 的 DEBUG 对照例时用
+      # `$env:HADOOP_ROOT_LOGGER="DEBUG,RFA"; docker compose up -d` 换一份现场，
+      # 采完再 up 回默认。走环境变量而不是改 log4j.properties：那份配置是四个
+      # 容器共用的挂载，改文件等于改仓库，而这个开关本来就该"开一次、然后关掉"。
+      HADOOP_ROOT_LOGGER: "${HADOOP_ROOT_LOGGER:-INFO,RFA}"
       HADOOP_LOG_FILE: hadoop-hdfs-namenode-nn.log
       # Java 8 用 -Xloggc（-Xlog:gc 是 9+ 的写法）；GC 文件名故意不带
       # "hadoop-hdfs-namenode-" 前缀，否则会被主日志的 glob 一起吃掉（AmbiguousStream）
@@ -66,6 +71,11 @@ services:
       TZ: "UTC"
       HADOOP_HEAPSIZE: "512"
       HADOOP_LOG_DIR: /opt/hadoop/logs
+      # root level 默认 INFO,RFA。采 O4 的 DEBUG 对照例时用
+      # `$env:HADOOP_ROOT_LOGGER="DEBUG,RFA"; docker compose up -d` 换一份现场，
+      # 采完再 up 回默认。走环境变量而不是改 log4j.properties：那份配置是四个
+      # 容器共用的挂载，改文件等于改仓库，而这个开关本来就该"开一次、然后关掉"。
+      HADOOP_ROOT_LOGGER: "${HADOOP_ROOT_LOGGER:-INFO,RFA}"
       HADOOP_LOG_FILE: hadoop-hdfs-datanode-dn1.log
       HDFS_DATANODE_OPTS: >-
         -Xloggc:/opt/hadoop/logs/gc.log -XX:+PrintGCDetails
@@ -95,6 +105,11 @@ services:
       TZ: "UTC"
       HADOOP_HEAPSIZE: "512"
       HADOOP_LOG_DIR: /opt/hadoop/logs
+      # root level 默认 INFO,RFA。采 O4 的 DEBUG 对照例时用
+      # `$env:HADOOP_ROOT_LOGGER="DEBUG,RFA"; docker compose up -d` 换一份现场，
+      # 采完再 up 回默认。走环境变量而不是改 log4j.properties：那份配置是四个
+      # 容器共用的挂载，改文件等于改仓库，而这个开关本来就该"开一次、然后关掉"。
+      HADOOP_ROOT_LOGGER: "${HADOOP_ROOT_LOGGER:-INFO,RFA}"
       HADOOP_LOG_FILE: hadoop-hdfs-datanode-dn2.log
       HDFS_DATANODE_OPTS: >-
         -Xloggc:/opt/hadoop/logs/gc.log -XX:+PrintGCDetails
@@ -122,6 +137,11 @@ services:
       TZ: "UTC"
       HADOOP_HEAPSIZE: "512"
       HADOOP_LOG_DIR: /opt/hadoop/logs
+      # root level 默认 INFO,RFA。采 O4 的 DEBUG 对照例时用
+      # `$env:HADOOP_ROOT_LOGGER="DEBUG,RFA"; docker compose up -d` 换一份现场，
+      # 采完再 up 回默认。走环境变量而不是改 log4j.properties：那份配置是四个
+      # 容器共用的挂载，改文件等于改仓库，而这个开关本来就该"开一次、然后关掉"。
+      HADOOP_ROOT_LOGGER: "${HADOOP_ROOT_LOGGER:-INFO,RFA}"
       HADOOP_LOG_FILE: hadoop-hdfs-datanode-dn3.log
       HDFS_DATANODE_OPTS: >-
         -Xloggc:/opt/hadoop/logs/gc.log -XX:+PrintGCDetails

@@ -121,14 +121,38 @@ def _workload(action: str) -> None:
     docker_runner(["docker", "exec", CONTAINERS["nn"], "pkill", "-f", WORKLOAD_PATH])
 
 
+def _overrides(items: list[str]) -> dict[str, str]:
+    """把 `--config-override log_level=DEBUG` 这类写法解析成字典。
+
+    严格拒绝没有等号、键为空、重复键的写法：这些错误在生成的 manifest 里
+    会表现成"少了一条覆盖"或"后写的静默盖掉前面的"，而 manifest 是事后解释
+    数据差异的唯一依据 —— 不能靠猜。
+    """
+    parsed: dict[str, str] = {}
+    for item in items:
+        key, sep, value = item.partition("=")
+        key = key.strip()
+        if not sep or not key or not value.strip():
+            raise SystemExit(f"[error] --config-override 要吃 KEY=VALUE，收到 {item!r}")
+        if key in parsed:
+            raise SystemExit(f"[error] --config-override 的键重复了: {key}")
+        parsed[key] = value.strip()
+    return parsed
+
+
 def _describe(report: CollectReport) -> str:
     rows = [f"  case_id        {report.case_id}"]
-    rows.append(f"  记录数         {report.records}")
-    rows.append(f"  原始行数       {report.raw_line_count}")
-    rows.append(f"  解析失败       {report.parse_failed}")
     # counts/hashes 的真相在 manifest 里：report 只报"这一轮"的数字，
     # 全量统计（含续采累加）必须看 manifest，别在这里重新算一遍。
     counters = report.manifest.counters
+    rows.append(f"  记录数         {report.records}")
+    rows.append(f"  原始行数       {report.raw_line_count}")
+    # counters.parse_failed 只数 failed（真的一个字都认不出来）。两者分开报：
+    # DEBUG 档位下 partial 一千多条是常态（Java 栈被正确并进上一条），若混报成
+    # "解析失败"，会让人误以为解析器坏了。
+    rows.append(f"  解析异常       {report.parse_failed} 条（partial+failed）")
+    if counters.parse_failed:
+        rows.append(f"  其中硬失败     {counters.parse_failed} 条（failed，原文见 raw）")
     rows.append(f"  level 分布     {dict(counters.by_level)}")
     rows.append(f"  component 分布 {dict(counters.by_component)}")
     rows.append(f"  脱敏计数       {dict(counters.redacted)}")
@@ -163,6 +187,16 @@ def main(argv: list[str] | None = None) -> int:
     # 1 秒一轮：跟随越快，指标节拍越接近 5 秒（每轮 drain 只读增量，代价与新增行数成正比）。
     # 2 秒一轮时实测 docker_stats 平均间隔约 6.7 秒 —— 比 P-A §6.1 要求的 5 秒稀。
     parser.add_argument("--poll-interval", type=float, default=1.0)
+    # 这一例的现场与同族不一样时（典型：O4 的 DEBUG 对照例把 log4j 调到 DEBUG），
+    # 必须把差异写进 manifest —— 否则同一族里"行数差二十倍"没法解释，
+    # 也没法复现。键值随便写，`config_overrides` 不进任何哈希。
+    parser.add_argument(
+        "--config-override",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="写进 manifest.config_overrides，可重复（如 --config-override log_level=DEBUG）",
+    )
     parser.add_argument("--dry-run", action="store_true", help="只打印注入剧本，不碰集群")
     parser.add_argument("--no-workload", action="store_true", help="不跑读写负载")
     args = parser.parse_args(argv)
@@ -216,6 +250,7 @@ def main(argv: list[str] | None = None) -> int:
         redactor=PatternRedactor(),
         metrics=_metrics_session(),
         start_at_end=True,
+        config_overrides=_overrides(args.config_override),
     )
 
     mode, hook = CollectMode.BASELINE, None

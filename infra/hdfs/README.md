@@ -134,11 +134,43 @@ python scripts/collect_case.py --case inc_dnvol_01 --inject dn_volume --dry-run
 `start_at_end`（起采前把每条流挪到 EOF，否则启动时 22KB 的 STARTUP_MSG classpath
 会被算进这 5 分钟）。
 
+## DEBUG 对照例（O4：日志量涨一个数量级时采集器不炸）
+
+root level 从 `log4j.properties` 挪到了环境变量，所以换现场不用改仓库文件：
+
+```powershell
+$env:HADOOP_ROOT_LOGGER='DEBUG,RFA'          # 默认是 INFO,RFA
+cd infra/hdfs; docker compose down; docker compose up -d
+cd ../..; make collect CASE=base_healthy_debug_01 ARGS="--minutes 2 --config-override log_level=DEBUG"
+# 采完一定切回来，否则后面所有例子的 level 分布都没法横向比
+Remove-Item Env:\HADOOP_ROOT_LOGGER
+cd infra/hdfs; docker compose down; docker compose up -d
+```
+
+`--config-override log_level=DEBUG` 会写进 `manifest.config_overrides` —— 它是**事后解释数据差异的唯一依据**，
+所以它刻意不进任何哈希（改日志级别不该让指纹变脏）。
+
+2026-11-23 实测（`base_healthy_debug_01`，2 分钟）：**10638 条**（DEBUG 9949 / INFO 682 / WARN 7）、
+原始 15764 行、硬失败 **0** 条、`partial` 1162 条（`UserGroupInformation` 后面的 3–4 行 Java 栈被正确并进上一条）、
+`pack-lint` PASS。同一份代码下 INFO 档是 318 条/分钟，DEBUG 档 **5319 条/分钟 —— 16.7 倍**。
+
+两个必须知道的副作用：
+
+- 审计 / 安全日志是**独立 logger**，仍是 INFO —— 对照例要证明的是"主日志涨多少"，审计流的行数不该跟着动。
+- 主日志是**追加写**的：DEBUG 跑完后那 8 MB 已混进同一个 `hadoop-hdfs-namenode-nn.log`。
+  想要一份干净语料就 `docker compose down -v` 重来（会清数据卷）。
+
 ## 已知缺口
 
 - **`gc.log` 没接进采集链路**（O8）：要接得先加第三个解析档位 `jvm_gc`。
 - **`df` 的读数只有 dn1 是"这块盘"**：dn2/dn3 的数据目录在 Docker 命名卷上，
   `df` 报的是宿主机磁盘（1.08TB），所以容量类判据要看 dn1。
-- **副本不足类判据用不上**：`replication=2` 下单台 DN 掉线不会产生 under-replicated
-  块，所以 `DN_HEARTBEAT` 只靠 `dead_datanodes` 与日志本身。
+- **副本不足类判据用不上**：`replication=3` 下把单台 DN 从网络里摘掉，只剩 2 份副本、
+  仍满足最小复制数，不会产生 under-replicated 块，所以 `DN_HEARTBEAT` 只靠
+  `dead_datanodes` 与日志本身。
+- **故意删块做实验之后，记得 `fsck -delete`**：2026-11-23 删过 `blk_1073744860` 的三份副本
+  去做"块缺失型安全模式"，收尾没清干净，于是每次 `verify-gates --v7 --live` 都报
+  `Missing blocks = 1`，而每个 healthy 例的 NN 日志里也持续出现
+  `Failed to place enough replicas`。修法是 `make verify-gates ARGS="--v7 --live --repair"`。
+  这条闸门就是为这种"实验留伤"设计的 —— 它红了，先修现场再采数据。
 

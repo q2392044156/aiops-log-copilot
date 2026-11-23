@@ -315,6 +315,7 @@ class Collector:
     __slots__ = (
         "_case_id",
         "_clock",
+        "_config",
         "_created_at",
         "_labels",
         "_metrics",
@@ -340,6 +341,7 @@ class Collector:
         clock: Callable[[], datetime] | None = None,
         metrics: MetricsSession | None = None,
         start_at_end: bool = False,
+        config_overrides: Mapping[str, str] | None = None,
     ) -> None:
         if labels.case_id != case_id:
             raise CollectError(f"labels.case_id={labels.case_id!r} 与 case_id={case_id!r} 不一致")
@@ -360,6 +362,11 @@ class Collector:
         self._clock = clock if clock is not None else (lambda: datetime.now(UTC))
         self._metrics = metrics
         self._start_at_end = start_at_end
+        # `config_overrides` 是"这一例的现场和别人不一样，记下来"的地方：
+        # 典型就是 log4j 的 root level（O4 的 DEBUG 对照例）。它**不进任何哈希**
+        # （P-A §6.4 的排除项），只进 manifest，供人事后解释"为什么这一例的
+        # 行数比同族多二十倍"。键值都转成字符串，避免 JSON 里出现 True/"true" 两种写法。
+        self._config = {str(key): str(value) for key, value in (config_overrides or {}).items()}
 
     # ------------------------------------------------------------ 对外
 
@@ -832,6 +839,7 @@ class Collector:
                 version=getattr(self._redactor, "version", "none"),
                 rules=tuple(getattr(self._redactor, "rules", REDACT_RULES)),
             ),
+            config_overrides=dict(self._config),
         )
 
 
