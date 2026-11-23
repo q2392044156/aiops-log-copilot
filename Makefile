@@ -1,4 +1,4 @@
-﻿# ============================================================================
+# ============================================================================
 # aiops-log-copilot —— 统一任务入口
 #
 # 为什么用 Makefile：计划里那些验收红线（`make pack-lint`、`make verify-collect`
@@ -25,13 +25,13 @@ help:
 	@echo   lint            ruff 静态检查 + 格式检查（只查不改）
 	@echo   fmt             ruff 格式化 + 自动修可修的 lint 问题（会改文件）
 	@echo   type            pyright 类型检查（首次运行要下一份 node，较慢）
-	@echo   test            pytest（当前 434 条契约测试）
+	@echo   test            pytest（当前 457 条契约测试）
 	@echo   pack-lint       校验 CasePack：make pack-lint CASE=inc_dnvol_01 CHECK=levels
 	@echo   verify-collect  132/132 一致性核验（第 11 步才有脚本）
 	@echo   verify-gates    收口闸门 V3/V4/V7：make verify-gates ARGS="--v4"
 	@echo   collect         采一个病例：make collect CASE=base_healthy_01 ARGS="--minutes 5"
 	@echo   annotate        补标注：make annotate CASE=inc_dnvol_01 ARGS="--from-measurements"
-	@echo   ask             命令行问答入口（第 9 步才有脚本）
+	@echo   ask             对一个 pack 做关键词检索：make ask CASE=xxx ARGS="-k Excluding"
 
 # ---------------------------------------------------------------------------
 # 基础三件套
@@ -90,16 +90,13 @@ verify-gates:
 	$(PY) scripts/verify_gates.py $(ARGS)
 
 # ---------------------------------------------------------------------------
-# 还只有名字的目标：脚本没写就打印一句人话，而不是扔 "can't open file" 让人
-# 以为环境坏了。
+# ask：命令行问答入口（P-A §8.2 的"最小闭环"）
+#
+# 检索逻辑在 `store/query.py`（可被测试直接调用），这个目标只负责把
+# `CASE=` 与 `ARGS=` 拧成 argv。命中 0 条不是错误 —— 那是查询该给的答案。
 # ---------------------------------------------------------------------------
 ask:
-ifeq ($(wildcard scripts/ask.py),)
-	@echo [ask] 尚未实现: scripts/ask.py 在第 9 步落地
-	@exit 1
-else
-	$(PY) scripts/ask.py $(ARGS)
-endif
+	$(PY) scripts/ask.py $(if $(CASE),--case $(CASE),) $(ARGS)
 
 # ---------------------------------------------------------------------------
 # 现场采集（第 15、16 步落地）：collect 采一例，annotate 补人的判断
