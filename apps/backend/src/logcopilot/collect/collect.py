@@ -51,7 +51,7 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -365,6 +365,7 @@ class Collector:
         follow_until: datetime | None = None,
         poll_interval: float = 2.0,
         sleeper: Callable[[float], None] | None = None,
+        resume_from: Mapping[str, AdapterState] | None = None,
     ) -> CollectReport:
         """跑一次采集并 finalize。
 
@@ -375,6 +376,12 @@ class Collector:
         每次之间 sleep `poll_interval` 秒。不给就只 drain 一轮（单测默认）。
         真实采集必须给 —— 5 分钟的正常态样本不是"读一次现有日志"，而是
         "盯着日志看 5 分钟"。
+
+        `resume_from` 是"外部指定的起点"（key 形如 `dn1:main`）。它存在的
+        唯一理由是**可重复性**：V3 要证明"一次采完"与"中断后补完"等价，
+        那就必须让两次采集从**同一批偏移**出发；各自 `prime()` 的话，两次
+        prime 之间写入的行会让两侧天然错位，闸门会报假红。给了它就不再做
+        `start_at_end`，也不读磁盘上的 checkpoint（attach 模式另说）。
         """
         paths = pack_paths(self._root, self._case_id)
 
@@ -389,6 +396,11 @@ class Collector:
             )
         if poll_interval <= 0:
             raise CollectError("poll_interval 必须大于 0")
+        if resume_from is not None and mode is CollectMode.ATTACH:
+            raise CollectError(
+                "attach 模式不接受 resume_from —— 续采的起点只能来自 checkpoint.json，"
+                "否则等于用别人的偏移读这个 pack"
+            )
 
         resuming = mode is CollectMode.ATTACH
         if resuming:
@@ -402,7 +414,11 @@ class Collector:
             # attach 会以为"这不是一次中断的采集"，把一个可续采的现场
             # 判成不可续采。空 checkpoint 表示"这次采集开过头，一行没成"。
             self._save_checkpoint(paths, acc)
-            if self._start_at_end:
+            if resume_from is not None:
+                # 外部指定的起点（V3 场景）：直接种进 acc 并落盘，跳过一次 prime。
+                acc.states.update(resume_from)
+                self._save_checkpoint(paths, acc)
+            elif self._start_at_end:
                 # "从现在开始采"：把每条流推到文件末尾再落一次 checkpoint。
                 # 不这么做的话，第一次 drain 会把集群启动时的 22KB 启动日志
                 # 一口吞进 5 分钟窗口，采出来的是"启动分布"而不是运行状态。

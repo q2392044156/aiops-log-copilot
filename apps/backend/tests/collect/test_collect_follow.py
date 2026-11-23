@@ -496,3 +496,54 @@ def test_inject_starts_only_at_the_fault_phase_boundary(tmp_path: Path) -> None:
     )
     assert seen, "hook 必须被调用"
     assert seen[0] >= fault_since, f"注入发生在 {seen[0]}，早于 fault 段起点 {fault_since}"
+
+
+# ------------------------------------------------------------------ 外部指定起点
+#
+# `resume_from` 是 V3 的支点：两次采集要等价，就得从**同一批偏移**出发。
+# 各自 prime 的话，两次 prime 之间写入的行会让两侧天然错位。
+
+
+def test_resume_from_seeds_the_start_offsets(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    path = _log(logs, 2)
+    clock = FakeClock(T0)
+    root = logs / "cases"
+    adapter = FileAdapter(logs, (FileStream("dn1", "main", 0, "dn1/hadoop-hdfs-datanode-*.log"),))
+    # 先手动 prime 一次，拿到"此刻的末尾" —— 之后所有采集都从这个位置出发
+    states = adapter.prime()
+
+    collector = _collector(root, clock, until=T0 + timedelta(seconds=5))
+    report = collector.collect(resume_from=states)
+
+    # 文件里已有 2 行，但起点在末尾 → 一条都不该采到
+    assert report.records == 0
+    assert _records(root) == []
+
+    # 追加一行，再用同一批 states 采一次（新 case_id 才不会被 CasePackExists 拦）
+    _append(path, 99)
+    collector2 = Collector(
+        root,
+        case_id="base_healthy_02",
+        profile=CanonicalProfile.LAB,
+        window=Window(since=T0, until=T0 + timedelta(seconds=5)),
+        labels=Labels(case_id="base_healthy_02"),
+        sources=(SourceSpec(component="dn1", adapter=adapter, ref="test"),),
+        clock=clock,
+    )
+    report2 = collector2.collect(resume_from=states)
+    text = (root / "base_healthy_02" / "logs.jsonl").read_text(encoding="utf-8")
+    rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+
+    assert report2.records == 1
+    assert [row["id"] for row in rows] == ["dn1:00003"], "编号必须接着物理行数走"
+
+
+def test_resume_from_is_rejected_in_attach_mode(tmp_path: Path) -> None:
+    _log(tmp_path / "logs", 1)
+    clock = FakeClock(T0)
+    collector = _collector(tmp_path / "logs" / "cases", clock, until=T0 + timedelta(seconds=5))
+    collector.collect()
+
+    with pytest.raises(CollectError, match="attach 模式不接受 resume_from"):
+        collector.collect(mode=CollectMode.ATTACH, resume_from={})

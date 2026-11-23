@@ -345,7 +345,7 @@ data/cases/<case_id>/
 |---|---|---|---|
 | V1 | 采样可通过 lint | `make pack-lint` | 1 个 sample CasePack 全字段合法 |
 | V2 | 旧 132 例迁移一致 | `make verify-collect` | **132/132**：每例的 行数 / level 分布 / component 分布 / 两个哈希 与**独立第二实现**重算的结果相等，且与 `tests/fixtures/verify/baseline.json` 冻结的基准逐字段相等；差异白名单为空 |
-| V3 | 续采不重不漏 | 采 → `Ctrl-C` → `--resume` | 合并后行数 == 一次性采满的行数；`id` 集合完全相同（无重复、无遗漏） |
+| V3 | 续采不重不漏 | `make verify-gates ARGS="--v3 A B"` | 两侧**各自**没有重复 `id`；记录内容的多重集合相同（`(ts, level, component, logger, message, raw, parse_status)` 逐条对账）；`counters` 相同。**不比 `id` 序列与 `canonical_sha256`**（见下方 O11） |
 | V4 | 两条读路径一致 | 同窗口分别用 `file` 与 `docker --path` 采 | `canonical_sha256` 相等（canonical 投影已排除 `source`，见 §6.3） |
 | V5 | 正常例零 ERROR | `make pack-lint CASE=base_healthy_01 CHECK=levels` | `by_level.ERROR == 0` |
 | V6 | 故障例有证据（**只对 `origin=collected` 的新采例成立**） | `make pack-lint CASE=inc_dnvol_01 CHECK=levels`（3 个 `inc_*` 各跑一次） | `min_error_lines + min_warn_lines >= 1`；实测 `ERROR`/`WARN` 各自不低于门槛；`expect.error_components` 非空且其中每个组件都真的出现过**非 INFO**（WARN 或 ERROR）记录。**不做反向断言**：expect 之外的组件跟着报错不算失败 |
@@ -361,6 +361,10 @@ data/cases/<case_id>/
 >
 > 现在的三条是**正向断言**：门槛不全 0、实测 ERROR/WARN 各自达标、`expect.error_components` 里点名的组件真的出过非 INFO 记录。**刻意不做反向断言**（"expect 之外的组件不许报错"）：故障会级联，上游出事、下游跟着 WARN 是正常的；拿反向去卡只会让真实样本过不了。`expect.error_components` 的语义也随之放宽成"哪个组件会出现非 INFO 记录"，字段名沿用是为了不动 schema。
 > **O10（已知空洞）：`NN_SAFE_MODE` 造不出非 INFO 证据。** 2026-11-22 实采 `inc_safemode_01`（`dfsadmin -safemode enter` 2 分钟）的实测：故障段 212 条记录里 **211 条 INFO、1 条与故障无关的 WARN、0 条 ERROR**。机制是：安全模式是 NN 的**保护动作**，NN 只在主日志记一条 INFO（`Safe mode is ON`）、在审计日志记 `safemode_get/enter`，DN 侧什么也不记；客户端被拒时打的是 FsShell 纯文本（`Name node is in safe mode.`），不是 log4j 行。要给它造出 WARN，只能制造"块缺失型"安全模式（停 DN 到 `safemode.threshold.pct=0.99` 以下），那是另一个注入变体，本期不做。**P-E 评测必须知道：这一族只有 INFO 判别信息**，不能按"有没有非 INFO"来算召回。
+
+> **O11（已知约束）：`id` 里的行号是"读的先后"，不是内容坐标。** `id` 形如 `dn1:00123`，其中 123 由 `LineAllocator` 全局自增发出，按"哪个流先被读"决定。一次采完与"崩了再续"的读法不同：崩点之后继续读的那条流会拿到比别的流更大的号，于是**同一毫秒**（几条流各写一行、ts 完全相同）的平局排序会变，`canonical_sha256` 跟着变 —— 内容一字不差，只是 id 在平局内部换了位置。
+>
+> 2026-11-23 做 V3 闸门时用真实集群打出来的：两侧各 194 条、id 集合与 counters 全等、内容多重集合全等，但 39 条的 id 落了不同的行，`canonical_sha256` 不同。**处置**：V3 只断言"不重不漏 + 内容一致"（`compare_packs`），不比 id 序列与哈希。要把这两个也稳定下来，得让 `id` 由「流名 + 流内偏移」派生而不是全局自增 —— 那是 id 格式的 schema 变更，132 个已迁移 pack 都要重迁，并同步改 `tests/fixtures/verify/baseline.json`。真要做时单开一步。
 
 
 ---
@@ -434,6 +438,10 @@ data/cases/<case_id>/
 | **O5** | S1 内采 3 例够不够 | 3 / 6 / 12 | **3**：S1 求"管线通"，数据集在 S6 前补齐（§3.4） |
 | **O6** | 指纹拆分（§6.4）是否采纳 | — | **已闭环**：总计划 v1.0 §4.1 已直接写成两个哈希，无需再拍板；本文只留定义 |
 | **O7** | docker adapter 是否实现 `docker logs --since` 取 stdout | 实现 / 不实现 | **已闭环：不实现**。它给不出字节偏移，续采必猜，V3 失守；stdout 改由 §2 的 `tee` 落盘，复用同一条 `tail -c` 语义（一进 §6.1、A-R1） |
+| **O8** | 是否采 `gc.log` | 采 / 不采 | **已闭环：不采**（v0.3 改）。Java 8 的 GC 行 `2026-11-22T11:46:27.166+0000: ...` 既不符 `hdfs_log4j` 也不符 `lab`，续行判据会把它整段拼进最后一条 DataNode 日志。要收它得先加 `jvm_gc` 档位 |
+| **O9** | 服务端 ERROR 从哪来 | — | **已闭环**：HDFS 服务端 ERROR 基本只来自**启动期致命失败**（`DiskChecker$DiskErrorException` / `Failed to acquire lock` / `Initialization failed for Block pool`）。运行期故障只打 WARN，所以 V6 改成"非 INFO >= 1"（§7） |
+| **O10** | `NN_SAFE_MODE` 造不出非 INFO | — | **已知空洞**：见 §7 下方说明，P-E 必须按"只有 INFO"来算这一族 |
+| **O11** | `id` 的行号是"读的先后"而非内容坐标 | 现在改 / 以后改 | **以后改**：V3 因此只断言"不重不漏 + 内容一致"，不比 id 序列与 `canonical_sha256`。真要改得让 id 由「流名 + 流内偏移」派生，属于 id 格式的 schema 变更，132 个迁移 pack 与 `tests/fixtures/verify/baseline.json` 都要重做（§7 的 O11 段有实测记录） |
 
 ---
 
@@ -452,6 +460,7 @@ data/cases/<case_id>/
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.5 | 2026-11-23 | 收口（V3 / V4 / V7 从"演示过"变成命令）：新增 `collect/gates.py` + `scripts/verify_gates.py` + `make verify-gates`。V3 的口径按实测改写成"不重不漏 + 内容多重集合一致"，**不比 `id` 序列与 `canonical_sha256`**（新记 O11：`id` 里的行号是按"读的先后"发的，崩点会让同一毫秒的平局换位）。§10 补齐 O8–O11 的闭环状态 |
 | v0.4 | 2026-11-22 | 实采回填：§2.2/§2.3/§2.4 把 dn1 数据盘从 `128m` 改成 `2g`，改用 `dfs.blocksize=32m` + `dfs.replication=3`（块比盘大时 dn1 永远不接块，盘满无痕）；V6 从"ERROR>=1"改成"非 INFO>=1"（真实故障的日志表现几乎都是 WARN，ERROR 只在 DN 启动失败时出现），`audit_levels` 改为三条正向断言、不做反向断言；`expect` 门槛允许为 0 但和必须 >=1 |
 | v0.3 | 2026-11-22 | 实现回填（第 9 / 11 / 12 步）：§6.1 docker adapter 改成"把容器当远端文件系统、只用 `tail -c` 一套 offset 语义"，**不实现 `docker logs --since`**，stdout 改由 §2 的 `tee` 落盘（O7 闭环）。V6 收紧为"只对 `origin=collected` 成立"（迁移的 132 例里 104 例根本没有 ERROR），并补一段说明。V2 改成"独立第二实现 + `tests/fixtures/verify/baseline.json` 冻结基准"，差异白名单取消（A-R4 改为重新冻结基准并在提交里露 diff）。§8.2 M1.4 补 `store/verify.py` 与基准文件；A-R1 标已落地 |
 | v0.2 | 2026-11-22 | 对齐总计划 v1.0：引用改指 §4.1 / §5 / §7 / §8.2，路径补 `apps/backend/src/logcopilot/` 前缀，补 M0.x 前置表。CasePack 读写归 `store/casepack.py`（并入原 `collect/pack.py` 与 `collect/manifest.py`）。`LogRecord` 定死 10 字段：`id = {component}:{line_no:05d}`、`ts` 用 `+00:00`、新增 `logger`、`raw` 仅非 ok 出现。canonical 拆 `hdfs_log4j` / `lab` 两个 profile，按实测语法 A/B 与"续行也带前缀"重写判据。redact 要求对已有占位符幂等。`canonical_sha256` 只覆盖 canonical 投影（排除 `source`/`raw`），排序键改 `(ts, id)`，新增 `finalize` 阶段。`pipeline_version` / `redact_policy.version` / `canonical_profile` 明确不入任何哈希。V2 改用独立 oracle + 冻结 fixture，新增 V9（两种旧语法），命令改 `CASE=`/`CHECK=`。`window.phases` 与 `fault_injection` 可空并给出反推规则；O6 标记闭环 |

@@ -145,10 +145,24 @@ def test_docker_stream_rejects_bad_name_and_order() -> None:
 
 
 def test_container_streams_match_the_file_side_layout() -> None:
+    """两边清单必须逐条对应 —— 这是 V4（双路径逐字节相同）的前提。
+
+    刻意不比较 `pattern` 的写法（file 侧带 `component/` 前缀，docker 侧只有
+    文件名），只比**名字与顺序**；另外钉死两件容易走偏的事：`gc.log` 不在
+    清单里（O8，会污染续行判定）、stdout 的 pattern 带容器名（否则会吞掉
+    `workload.out`）。
+    """
     nn = {stream.name: stream.order for stream in container_streams("nn")}
     dn = {stream.name: stream.order for stream in container_streams("dn1")}
-    assert nn == {"main": 0, "audit": 1, "gc": 2, "stdout": 3}
-    assert dn == {"main": 0, "gc": 2, "stdout": 3}
+    assert nn == {"main": 0, "audit": 1, "stdout": 2, "workload": 3}
+    assert dn == {"main": 0, "stdout": 2}
+
+    patterns = {
+        stream.name: stream.pattern for stream in container_streams("nn", container="alcp-nn")
+    }
+    assert patterns["stdout"] == "alcp-nn.out"
+    assert patterns["workload"] == "workload.out"
+    assert "gc" not in patterns
 
 
 def test_adapter_declares_docker_kind() -> None:
@@ -161,13 +175,11 @@ def test_adapter_declares_docker_kind() -> None:
 def test_streams_lists_files_and_builds_posix_paths() -> None:
     container = FakeContainer()
     container.put("hadoop-hdfs-datanode-nn.log", "x\n")
-    container.put("gc.log", "g\n")
     container.put("dn1.out", "o\n")
     specs = adapter_for(container).streams()
-    assert [spec.name for spec in specs] == ["main", "gc", "stdout"]
+    assert [spec.name for spec in specs] == ["main", "stdout"]
     assert [spec.path for spec in specs] == [
         f"{LOG_DIR}/hadoop-hdfs-datanode-nn.log",
-        f"{LOG_DIR}/gc.log",
         f"{LOG_DIR}/dn1.out",
     ]
 
@@ -179,9 +191,10 @@ def test_streams_skips_missing_files() -> None:
 
 
 def test_streams_raises_on_ambiguous_pattern() -> None:
+    """主日志 pattern 里的 `*` 一旦放宽（比如改成 `*.log`）就会命中轮转文件。"""
     container = FakeContainer()
-    container.put("a.out", "a\n")
-    container.put("b.out", "b\n")
+    container.put("hadoop-hdfs-datanode-a.log", "a\n")
+    container.put("hadoop-hdfs-datanode-b.log", "b\n")
     with pytest.raises(AmbiguousStream, match="匹配到 2 个文件"):
         adapter_for(container).streams()
 

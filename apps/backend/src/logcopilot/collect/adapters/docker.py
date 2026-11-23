@@ -136,17 +136,28 @@ class DockerStream:
             )
 
 
-def container_streams(component: str) -> tuple[DockerStream, ...]:
-    """一个容器里那几条日志的默认声明（与 `hdfs_streams` 一一对应）。
+def container_streams(component: str, *, container: str | None = None) -> tuple[DockerStream, ...]:
+    """一个容器里那几条日志的默认声明（**必须**与 `hdfs_streams` 逐条对应）。
 
-    `nn` 多一条 `hdfs-audit.log`；DN 没有审计日志。`stdout` 由第 12 步的
-    compose 里的 `tee` 落成 `<component>.out`（见模块头注释）。
+    这条"逐条对应"不是洁癖，是 V4 的前提：两条路径要产出逐字节相同的
+    canonical 投影，就必须读同一批流、同一种顺序。所以这里刻意照抄
+    `file.hdfs_streams` 的清单（含 `workload.out`、不含 `gc.log`），两边
+    任何一边改了，`scripts/verify_gates.py --v4` 会当场红。
+
+    `nn` 多一条 `hdfs-audit.log` 和一条 `workload.out`；DN 没有审计日志。
+    `stdout` 由 compose 里的 `tee` 落成 `<容器名>.out`（见模块头注释），
+    所以 pattern 要带上容器名——`*.out` 会把 `workload.out` 一起吞掉，
+    同一个组件两条流命中同一个文件会直接 `AmbiguousStream`。
     """
+    prefix = container or component
     streams = [DockerStream("main", 0, "hadoop-hdfs-*-*.log")]
     if component == "nn":
         streams.append(DockerStream("audit", 1, "hdfs-audit.log"))
-    streams.append(DockerStream("gc", 2, "gc.log"))
-    streams.append(DockerStream("stdout", 3, "*.out"))
+    streams.append(DockerStream("stdout", 2, f"{prefix}.out"))
+    if component == "nn":
+        # 与 file 侧同一条流：`hdfs dfs` 客户端的 ERROR/WARN（四族里三族的
+        # ERROR 只能在这里出现，见 P-A §1）
+        streams.append(DockerStream("workload", 3, "workload.out"))
     return tuple(streams)
 
 
@@ -305,7 +316,11 @@ class DockerAdapter:
         self._container = container
         self._component = component
         self._log_dir = log_dir.rstrip("/")
-        self._streams = tuple(streams) if streams is not None else container_streams(component)
+        self._streams = (
+            tuple(streams)
+            if streams is not None
+            else container_streams(component, container=self._container)
+        )
         self._runner: Runner = runner if runner is not None else SubprocessRunner()
 
     @property

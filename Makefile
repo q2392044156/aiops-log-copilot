@@ -17,7 +17,7 @@ PY      := $(UV) run --project $(BACKEND) python
 ARGS    ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint fmt type test pack-lint verify-collect collect annotate annotate-check ask
+.PHONY: help install lint fmt type test pack-lint verify-collect verify-gates collect annotate annotate-check ask
 
 help:
 	@echo 用法: make 目标   [ARGS=附加参数]
@@ -25,9 +25,10 @@ help:
 	@echo   lint            ruff 静态检查 + 格式检查（只查不改）
 	@echo   fmt             ruff 格式化 + 自动修可修的 lint 问题（会改文件）
 	@echo   type            pyright 类型检查（首次运行要下一份 node，较慢）
-	@echo   test            pytest（当前 411 条契约测试）
+	@echo   test            pytest（当前 431 条契约测试）
 	@echo   pack-lint       校验 CasePack：make pack-lint CASE=inc_dnvol_01 CHECK=levels
 	@echo   verify-collect  132/132 一致性核验（第 11 步才有脚本）
+	@echo   verify-gates    收口闸门 V3/V4/V7：make verify-gates ARGS="--v4"
 	@echo   collect         采一个病例：make collect CASE=base_healthy_01 ARGS="--minutes 5"
 	@echo   annotate        补标注：make annotate CASE=inc_dnvol_01 ARGS="--from-measurements"
 	@echo   ask             命令行问答入口（第 9 步才有脚本）
@@ -76,6 +77,17 @@ pack-lint:
 # ---------------------------------------------------------------------------
 verify-collect:
 	$(PY) scripts/verify_collect.py $(if $(CASE),--case $(CASE),) $(ARGS)
+
+# ---------------------------------------------------------------------------
+# verify-gates：V3 / V4 / V7 三条跨对象闸门
+#
+# 与上面两条的区别：V1/V2 只看 pack 自己（自洽、没漂移），这三条问的是
+# "两个 pack 是否等价"（V3）、"两条取数路径是否逐字节相同"（V4）、
+# "注入之后是否复原"（V7）。它们需要集群在跑，所以单独一个目标。
+# 默认不带参数时只跑 V7 的离线部分（不需要集群）。
+# ---------------------------------------------------------------------------
+verify-gates:
+	$(PY) scripts/verify_gates.py $(ARGS)
 
 # ---------------------------------------------------------------------------
 # 还只有名字的目标：脚本没写就打印一句人话，而不是扔 "can't open file" 让人
