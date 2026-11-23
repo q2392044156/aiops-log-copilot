@@ -38,6 +38,7 @@ P-A §6.1 写过"`docker logs --since` 取容器 stdout"。但 Hadoop 的日志�
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import shlex
 import subprocess
 from collections.abc import Callable, Iterator, Sequence
@@ -176,6 +177,7 @@ class DockerReader:
         "_offset",
         "_path",
         "_runner",
+        "_spans",
         "_spec",
         "_tail",
     )
@@ -191,6 +193,7 @@ class DockerReader:
         self._line_no = 0
         self._inode: int | None = None
         self._tail: str | None = None
+        self._spans: dict[int, tuple[int, int, str]] = {}
 
     @property
     def spec(self) -> StreamSpec:
@@ -231,10 +234,21 @@ class DockerReader:
             raw = payload[pos : newline + 1]
             pos = newline + 1
             text = decode_line(raw)
+            start = self._offset
             self._offset += len(raw)
             self._line_no += 1
             self._tail = line_sha1(text)
+            self._spans[self._line_no] = (start, len(raw), hashlib.sha256(raw).hexdigest())
             yield self._line_no, text
+
+    def spans(self) -> dict[int, tuple[int, int, str]]:
+        """这次读到的每一行在**容器内文件**里的字节区间（同 file 侧口径）。
+
+        `file` 与 `docker` 两条路径的偏移必须逐字节可比（V4），所以这里的
+        `offset` 指的是容器里那份文件的偏移；宿主机上的 bind mount 是同一份
+        字节，两边算出来的数字应当相同。
+        """
+        return dict(self._spans)
 
     def state(self) -> AdapterState:
         return AdapterState(

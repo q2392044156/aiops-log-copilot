@@ -366,6 +366,7 @@ def test_build_input_fingerprint_rejects_bad_raw_sha(tmp_path: Path) -> None:
 
 def test_anchors_round_trip(tmp_path: Path) -> None:
     anchor = AnchorRef(
+        id="dn1:00042",
         file="runtime/hdfs-logs/datanode1/x.log",
         offset=10,
         length=42,
@@ -382,9 +383,9 @@ def test_anchors_empty_is_valid(tmp_path: Path) -> None:
 
 def test_anchor_ref_rejects_bad_geometry() -> None:
     with pytest.raises(ValueError, match="length"):
-        AnchorRef(file="x.log", offset=0, length=0, sha256=RAW_SHA)
+        AnchorRef(id="dn1:00001", file="x.log", offset=0, length=0, sha256=RAW_SHA)
     with pytest.raises(ValueError, match="offset"):
-        AnchorRef(file="x.log", offset=-1, length=1, sha256=RAW_SHA)
+        AnchorRef(id="dn1:00001", file="x.log", offset=-1, length=1, sha256=RAW_SHA)
 
 
 # ---------------------------------------------------------------- audit

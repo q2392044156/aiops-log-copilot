@@ -83,14 +83,16 @@ from logcopilot.domain.case import (
     SourceRef,
     Window,
 )
-from logcopilot.domain.log import COMPONENTS, ParseStatus
+from logcopilot.domain.log import COMPONENTS, LogLevel, ParseStatus
 from logcopilot.store.casepack import (
+    AnchorRef,
     CasePackPaths,
     LogWriter,
     create_pack,
     finalize,
     open_log_writer,
     pack_paths,
+    read_anchors,
     write_labels,
 )
 
@@ -249,6 +251,11 @@ class _Accumulator:
     # 读到了、但时间戳落在窗口上界之后的记录数。行本身已经被消费（offset 前进、
     # 进 raw 哈希链），所以它们不会在续采时再出现 —— 丢的是"记录"，不是"字节"。
     dropped: int = 0
+    #: 证据行的原文指针（P-A §5：只存指针、不复制原文）。
+    #: 只给"值得回看"的行记：非 INFO 或解析不完整的记录。全 INFO 的 5 分钟
+    #: 基线如果有 1500 条记录、每条都记指针，index.json 会比 logs.jsonl 还大，
+    #: 而它指向的东西一条也不值得单独回看。
+    anchors: list[AnchorRef] = field(default_factory=list)
 
     def absorb(
         self, lines: Sequence[RawLine], result: CanonicalResult, *, dropped: int = 0
@@ -432,6 +439,12 @@ class Collector:
                     acc.states.update(prime())
                 self._save_checkpoint(paths, acc)
 
+        # 把已有的原文指针带进来：`finalize` 是**整体重写** `anchors/index.json`，
+        # 不搬过来的话，第二轮采集（attach 补采 / inject 第二段）会把上一轮的
+        # 指针全部抹掉 —— 而且抹得毫无痕迹，`entries` 变空仍然合法。
+        if paths.anchors_index.is_file():
+            acc.anchors = read_anchors(paths)
+
         injection: FaultInjection | None = None
         raw_before = acc.raw_lines
         writer = open_log_writer(paths)
@@ -515,6 +528,7 @@ class Collector:
             raw_line_count=acc.raw_lines,
             raw_sha256=acc.hasher.hexdigest,
             redacted=acc.redacted,
+            anchors=acc.anchors,
         )
         # finalize 成功 = checkpoint 已经并进 manifest，sidecar 可以退休了。
         paths.checkpoint_file.unlink(missing_ok=True)
@@ -617,6 +631,7 @@ class Collector:
 
             writer.extend(result.records)
             acc.absorb(lines, result, dropped=dropped)
+            self._record_anchors(acc, reader, lines, result)
             acc.states.update(reader.checkpoint())
             self._save_checkpoint(paths, acc)
         except BaseException:
@@ -626,8 +641,59 @@ class Collector:
             self._save_checkpoint(paths, acc)
             raise
 
-    # ------------------------------------------------------------ 内部：跟随
+    def _record_anchors(
+        self,
+        acc: _Accumulator,
+        reader: ComponentReader,
+        lines: Sequence[RawLine],
+        result: CanonicalResult,
+    ) -> None:
+        """给"证据行"记原文指针（P-A §5：只存指针，不复制原文）。
 
+        记哪些行是有讲究的。三条规则：
+
+        1. **只给非 INFO 或解析不完整的记录记**。5 分钟基线有 1500 条 INFO，
+           每条都记指针的话 `index.json` 比 `logs.jsonl` 还大，而它指向的东西
+           一条也不值得单独回看（P-C 要回看的是"故障那几条"）。
+        2. **`sha256` 是对那 N 个原始字节算的**，不是对解码后的文本。CRLF、
+           非法 UTF-8、行尾换行都在字节层 —— 只有原始字节才校验得住"这行没被
+           换掉"，也才让 `length` 这个词有意义。
+        3. **指针必须能落空**。适配器不给 `spans()`（测试假 reader、以后别的
+           适配器）时静默跳过：`anchors` 是可选能力，缺了不影响 pack 的合法性，
+           只是 P-C 拿不到行级引用。
+
+        续采时 `acc.anchors` 已经在内存里带着上一轮的指针，`known` 保证同一个
+        `id` 不会进来两次（`finalize` 会照原样写盘）。
+        """
+        spans = reader.spans()
+        if not spans:
+            return
+        known = {anchor.id for anchor in acc.anchors}
+        for record in result.records:
+            if record.parse_status is ParseStatus.OK and record.level is LogLevel.INFO:
+                continue
+            if record.id in known:
+                continue
+            # id 形如 `dn1:00042`；取回行号是为了在 spans 里找到这一行的字节位置。
+            _, _, digits = record.id.partition(":")
+            if not digits.isdigit():
+                continue
+            span = spans.get(int(digits))
+            if span is None:
+                continue  # 这一行不是本次读到的（比如续采前就有的）
+            path, offset, length, digest = span
+            acc.anchors.append(
+                AnchorRef(
+                    id=record.id,
+                    file=path,
+                    offset=offset,
+                    length=length,
+                    sha256=f"sha256:{digest}",
+                )
+            )
+            known.add(record.id)
+
+    # ------------------------------------------------------------ 内部：跟随
     def _follow(
         self,
         paths: CasePackPaths,
@@ -696,6 +762,10 @@ class Collector:
             "redacted": dict(sorted(acc.redacted.items())),
             "last_ts": acc.last_ts,
             "adapter_state": {key: state.to_dict() for key, state in sorted(acc.states.items())},
+            # 原文指针也要进 checkpoint：`index.json` 只在 finalize 时落盘，
+            # 中断时它还不存在 —— 不带进 checkpoint 的话，续采会把第一轮
+            # 已经证明过的那些证据行"忘掉"，而忘掉是**静默**的（空 entries 合法）。
+            "anchors": [anchor.to_dict() for anchor in acc.anchors],
         }
         text = (
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=False, default=_isoformat)
@@ -721,6 +791,7 @@ class Collector:
             redacted={str(key): int(value) for key, value in data.get("redacted", {}).items()},
             raw_lines=int(data["raw_line_count"]),
             last_ts=_parse_ts(data.get("last_ts")),
+            anchors=[AnchorRef.from_dict(entry) for entry in data.get("anchors", ())],
         )
         created_at = self._created_at or self._clock()
         return acc, created_at

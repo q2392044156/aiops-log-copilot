@@ -288,6 +288,7 @@ class ComponentReader:
         "_adapter",
         "_allocator",
         "_component",
+        "_spans",
         "_specs",
         "_states",
     )
@@ -315,6 +316,11 @@ class ComponentReader:
         #: 否则续采只能退回到上一条流的末尾，把已读的行重采一遍。
         self._active_reader: StreamReader | None = None
         self._active_last: int = 0
+        #: 每行的字节位置：`line_no -> (流路径, 起始字节, 字节长度)`。
+        #: 只为 `anchors/index.json` 服务（P-A §5：原文不复制，只存指针）。
+        #: 由适配器在 `read()` 里顺手记（它本来就知道自己读到第几个字节），
+        #: 采集层不需要再回读一遍文件 —— 回读既慢，又可能在两次读之间被追加。
+        self._spans: dict[int, tuple[str, int, int, str]] = {}
 
     @property
     def specs(self) -> tuple[StreamSpec, ...]:
@@ -335,11 +341,35 @@ class ComponentReader:
                 # 采集被中途叫停（break / close() / Ctrl-C）：
                 # 先把已读到的位置记下来，再把异常照原样抛出。
                 self._record(reader)
+                self._absorb_spans(reader, spec)
                 raise
             else:
                 self._record(reader)
+                self._absorb_spans(reader, spec)
             finally:
                 self._active_reader = None
+
+    def _absorb_spans(self, reader: StreamReader, spec: StreamSpec) -> None:
+        """把这条流读到的行位置并进来（`line_no -> 字节区间`）。
+
+        适配器不实现 `spans()` 也算正常（测试里的假 reader 就没有）——那时
+        `anchors` 就是空的，pack 仍然合法：`anchors/index.json` 允许 `entries: []`。
+        这里不报错，是因为"能不能给出原文指针"是能力问题，不是正确性问题；
+        139 个迁移 pack 也都有空的 anchors。
+        """
+        provider = getattr(reader, "spans", None)
+        if provider is None:
+            return
+        path = spec.path or spec.key
+        for line_no, (offset, length, digest) in provider().items():
+            self._spans[line_no] = (path, offset, length, digest)
+
+    def spans(self) -> dict[int, tuple[str, int, int, str]]:
+        """本次读到的行位置快照（`line_no -> (路径, 字节偏移, 字节长度, 原始字节哈希)`）。
+
+        只含**这次读到的**行；续采时老的 anchors 已经在 `index.json` 里了。
+        """
+        return dict(self._spans)
 
     def _record(self, reader: StreamReader) -> None:
         """把一条流的进度写进快照。

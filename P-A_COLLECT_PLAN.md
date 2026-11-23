@@ -188,8 +188,15 @@ data/cases/<case_id>/
 ├─ logs.jsonl             # canonical LogRecord，一行一条；采集中按到达序追加，finalize 后按 (ts, id) 排序
 ├─ metrics.jsonl          # 指标快照，一行一个时间点
 ├─ labels.json            # fault_injection（自动写）+ root_cause / severity / reviewer（人工）
-└─ anchors/index.json     # 指针 (file, offset, length, sha256) → runtime/ 下的原始日志，**不复制原文**
+└─ anchors/index.json     # 指针 (id, file, offset, length, sha256) → runtime/ 下的原始日志，**不复制原文**
 ```
+
+`anchors/index.json` 的三个约定（v0.6 补，之前 139 个 pack 的 `entries` 一直是空数组）：
+
+- `id` 指回 `logs.jsonl` 的某条记录（形如 `dn1:00042`）。没有它，指针只是"某个文件里的一段字节"，下游拿到一条记录无法反查原文。
+- **只给证据行记指针**：非 INFO 或 `parse_status != ok` 的记录。5 分钟基线有上千条 INFO，逐条记指针会让 `index.json` 比 `logs.jsonl` 还大，而那里面一条也不值得回看。
+- `length` 与 `sha256` 都是**原始字节**口径（含行尾换行），所以按 `(offset, length)` 读出来就是那行原话，`sha256` 能证明它没被换过（CRLF、非法 UTF-8 都在字节层，只有原始字节校验得住）。
+- 中途被打断时，指针存在 `checkpoint.json` 里 —— `index.json` 只在 finalize 写一次，不这么做的话 attach 会把第一轮的证据**静默**丢掉（`entries: []` 仍然是合法 pack，不会报错）。
 
 `logs.jsonl` 单行 = 一个 `LogRecord`（10 个字段，与 `domain/log.py` 一字不差）：
 

@@ -362,16 +362,24 @@ class AnchorRef:
     """一条"原文在哪"的指针（P-A §5：**不复制原文**）。
 
     采到的原文留在 `runtime/hdfs-logs/<container>/` 下（bind mount 出来的），
-    pack 里只存 `(file, offset, length, sha256)`。这样 pack 能被人 clone 走，
+    pack 里只存 `(id, file, offset, length, sha256)`。这样 pack 能被人 clone 走，
     体积也不随日志膨胀；要复核某行时按指针回去读，并用 sha256 证明没被改过。
+
+    `id` 是它指向的那条 `logs.jsonl` 记录（形如 `dn1:00042`）——没有这个字段，
+    指针就只是"某个文件里的一段字节"，下游（P-C 的 `get_event_evidence`）拿到
+    一条记录后无法反查它的原文。**这是 v0.5 补的**：之前 139 个 pack 的
+    `entries` 全是空数组，所以加字段不需要重迁任何数据。
     """
 
+    id: str
     file: str
     offset: int
     length: int
     sha256: str
 
     def __post_init__(self) -> None:
+        if not self.id:
+            raise ValueError("anchor.id 不能为空（它要指回 logs.jsonl 的某条记录）")
         if not self.file:
             raise ValueError("anchor.file 不能为空")
         if self.offset < 0:
@@ -383,6 +391,7 @@ class AnchorRef:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "id": self.id,
             "file": self.file,
             "offset": self.offset,
             "length": self.length,
@@ -393,6 +402,7 @@ class AnchorRef:
     def from_dict(cls, data: Mapping[str, object]) -> AnchorRef:
         try:
             return cls(
+                id=str(data["id"]),
                 file=str(data["file"]),
                 offset=int(data["offset"]),  # type: ignore[arg-type]
                 length=int(data["length"]),  # type: ignore[arg-type]

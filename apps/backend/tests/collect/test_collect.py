@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
@@ -50,6 +51,7 @@ from logcopilot.store.casepack import (
     CasePackExists,
     is_complete,
     pack_paths,
+    read_anchors,
     read_labels,
     read_logs,
     read_manifest,
@@ -678,3 +680,66 @@ def test_raw_hasher_chain_is_resumable() -> None:
 def test_raw_hasher_rejects_a_broken_chain() -> None:
     with pytest.raises(ValueError, match="链值长度"):
         RawHasher("sha256:abc")
+
+
+# ---------------------------------------------------------------- anchors（原文指针）
+#
+# `anchors/index.json` 是 P-A §5 承诺的东西：pack 里**不复制原文**，只存
+# "这条记录的原话在哪个文件的哪几个字节"。所以这些测试的重点不是"文件里有
+# 几条"，而是"按指针回去读，读到的确实是那行原话"。
+
+
+def test_anchor_pointers_cover_only_evidence_lines(tmp_path: Path) -> None:
+    stream = write_stream(tmp_path, "dn1", "hadoop-hdfs-datanode-dn1.log", [LINE_1, LINE_2, LINE_3])
+    make_collector(tmp_path).collect()
+
+    anchors = read_anchors(pack_paths(tmp_path, "inc_dnvol_01"))
+    # LINE_1 是 INFO：它是样本的主体，但没人会为一条正常日志回看原文。
+    assert [anchor.id for anchor in anchors] == ["dn1:00002", "dn1:00003"]
+
+    data = stream.read_bytes()
+    for anchor, line in zip(anchors, (LINE_2, LINE_3), strict=True):
+        assert anchor.file == str(stream)
+        raw = (line + "\n").encode()
+        assert anchor.length == len(raw)
+        assert data[anchor.offset : anchor.offset + anchor.length] == raw
+        assert anchor.sha256 == f"sha256:{hashlib.sha256(raw).hexdigest()}"
+
+
+def test_a_pack_with_only_info_lines_has_no_anchors(tmp_path: Path) -> None:
+    write_stream(tmp_path, "dn1", "hadoop-hdfs-datanode-dn1.log", [LINE_1])
+    make_collector(tmp_path).collect()
+
+    assert read_anchors(pack_paths(tmp_path, "inc_dnvol_01")) == []
+
+
+def test_attach_keeps_the_anchors_of_the_first_pass(tmp_path: Path) -> None:
+    """中断重采后，第一轮已经证明过的证据行不能"忘掉"。
+
+    指针只在 finalize 写一次 `index.json`，而中断时 finalize 还没跑 —— 所以
+    指针必须活在 checkpoint.json 里，否则 attach 会把它们丢掉。丢掉是**静默**的：
+    `entries: []` 也是合法 pack，没有任何报错。
+    """
+    write_stream(tmp_path, "dn1", "hadoop-hdfs-datanode-dn1.log", [LINE_2])
+    write_stream(tmp_path, "dn2", "hadoop-hdfs-datanode-dn2.log", [LINE_3])
+
+    broken = make_collector(
+        tmp_path,
+        components=("dn1", "dn2"),
+        sources=[
+            source_for(tmp_path, "dn1"),
+            SourceSpec(
+                component="dn2",
+                adapter=BoomAdapter(FileAdapter(tmp_path, hdfs_streams(("dn2",)))),
+                ref="fixture",
+            ),
+        ],
+    )
+    with pytest.raises(RuntimeError, match="容器挂了"):
+        broken.collect()
+    paths = pack_paths(tmp_path, "inc_dnvol_01")
+    assert not paths.anchors_index.exists()  # finalize 还没跑
+
+    make_collector(tmp_path, components=("dn1", "dn2")).collect(mode=CollectMode.ATTACH)
+    # dn1 的 WARN 来自第一轮（当时只存进了 checkpoint），dn2 的 ERROR 来自第二轮。
+    assert [anchor.id for anchor in read_anchors(paths)] == ["dn1:00001", "dn2:00001"]

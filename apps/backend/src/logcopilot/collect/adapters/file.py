@@ -143,7 +143,7 @@ class FileReader:
     否则 file 与 docker 两条路径各算一套，V4 必挂。
     """
 
-    __slots__ = ("_inode", "_line_no", "_offset", "_path", "_spec", "_tail")
+    __slots__ = ("_inode", "_line_no", "_offset", "_path", "_spans", "_spec", "_tail")
 
     def __init__(self, spec: StreamSpec) -> None:
         if spec.path is None:
@@ -154,6 +154,7 @@ class FileReader:
         self._line_no = 0
         self._inode: int | None = None
         self._tail: str | None = None
+        self._spans: dict[int, tuple[int, int, str]] = {}
 
     @property
     def spec(self) -> StreamSpec:
@@ -207,10 +208,22 @@ class FileReader:
                     # 半行：可能是正在写的最后一行，不消费、不推进 offset
                     return
                 text = decode_line(raw)
+                start = self._offset
                 self._offset += len(raw)
                 self._line_no += 1
                 self._tail = line_sha1(text)
+                self._spans[self._line_no] = (start, len(raw), hashlib.sha256(raw).hexdigest())
                 yield self._line_no, text
+
+    def spans(self) -> dict[int, tuple[int, int, str]]:
+        """这次读到的每一行在文件里的字节区间：`line_no -> (起始, 长度, 原始字节哈希)`。
+
+        长度**含行尾换行**，所以 `offset + length` 正好是下一行的起点 —— 拿
+        指针回去读时不会粘连下一行。哈希是对**那 N 个原始字节**算的（不是对
+        解码后的文本）：CRLF 与非法 UTF-8 都在字节层，只有原始字节才校验得住。
+        `anchors/index.json` 用的就是它。
+        """
+        return dict(self._spans)
 
     def state(self) -> AdapterState:
         return AdapterState(
