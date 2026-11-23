@@ -7,18 +7,18 @@
 > **与总计划的关系**：v0.1 的"本文会修订总计划一处（指纹拆分）"**已闭环**——总计划 v1.0 §4.1 已直接写成 `input_fingerprint` + `canonical_sha256` 两个哈希。本文只保留定义与不变式，不再有"待回填"项。
 > **代码落点**：下文相对路径都相对 `apps/backend/src/logcopilot/`（总计划 v1.0 §5 目录形状）；`scripts/`、`data/`、`infra/` 相对仓库根。
 
-## 0. 结项状态（v0.7）
+## 0. 结项状态（v0.8）
 
-> 这一节是 v0.6 唯一新增的"结论先行"块：先说清 P-A **做到了什么、没做到什么**，后面各节的规则才不会被当成"待办"来读。
+> 这一节是"结论先行"块：先说清 P-A **做到了什么、没做到什么**，后面各节的规则才不会被当成"待办"来读。
 
 | 维度 | 现状（2026-11-23 实测） |
 |---|---|
 | 代码 | 源码 + 脚本约 **8900 行**，17 个测试文件、**457 条用例**全绿；`ruff` / `pyright` 0 问题 |
-| 产物 | `data/cases/` 下 **141 个完整 pack**：**132 例迁移**（`origin=migrated`，旧实验台）+ **9 例真采**（`origin=collected`，本仓库集群） |
-| 闸门 | `pack-lint` 141/141、`verify-collect` 132/132（9 例新采不参与比对）、`verify-gates` V3/V4/V7 全通过 |
-| 环境 | `infra/hdfs/` 一套 1NN+3DN 即代码；`make collect` 一条命令出 pack，20 分钟一例（2+5+2 或 5+10+5） |
-| 未做 | ①样本矩阵只到 9 例（22 例计划见 §3.4）；②`NN_SAFE_MODE` 无判别证据（O10）；③`ports.py` 的 `CaseStore` 尚未落地（P-A 自己用不到）；④`anchors` 只有新采例有指针，迁移例没有 |
-| 复现 | `make install && make test`（457 条）→ `make verify-collect`（132/132）→ `make pack-lint`（141/141）→ `make verify-gates ARGS="--v7 --live"`（要集群在跑） |
+| 产物 | `data/cases/` 下 **154 个完整 pack**：**132 例迁移**（`origin=migrated`，旧实验台）+ **22 例真采**（`origin=collected`，本仓库集群，矩阵已按 §3.4 采满） |
+| 闸门 | `pack-lint` 154/154、`verify-collect` 132/132（22 例新采不参与比对）、`verify-gates` V3/V4/V7 全通过 |
+| 环境 | `infra/hdfs/` 一套 1NN+3DN 即代码；`make collect` 一条命令出 pack，9–14 分钟一例（2+5+2 或 2+10+2） |
+| 未做 | ①`NN_SAFE_MODE` 无判别证据（四次尝试，O10 + O12），四族里它是唯一没有 level 级证据的；②`ports.py` 的 `CaseStore` 尚未落地（P-A 自己用不到）；③`anchors` 只有新采例有指针，迁移例没有（指向旧项目路径，换 clone 即悬空）；④`edits 满` 型安全模式没做 |
+| 复现 | `make install && make test`（457 条）→ `make verify-collect`（132/132）→ `make pack-lint`（154/154）→ `make verify-gates ARGS="--v7 --live"`（要集群在跑） |
 
 ---
 
@@ -158,27 +158,25 @@ T-5min ────────── T0 ─────────────
 
 > 关于心跳：HDFS 默认 `heartbeat.interval=3s`、`recheck.interval=5min` → 判 dead 约需 `2*300+10*3=630s ≈ 10.5min`。**`DN_HEARTBEAT` 若只采 10 分钟，很可能采不到 dead 判定**。两个办法：①该例窗口拉到 15 min；②在 `conf/hdfs-site.xml` 把 `heartbeat.recheck.interval` 调到 `60s` 加速（**推荐 ②，并在 manifest 记 `config_overrides`**，否则面试时会被问"你是不是改了参数才造出故障"）。这一条是本计划里最容易踩的坑。
 
-### 3.4 采集矩阵：22 例的计划，已采 9 例（v0.7 回填）
+### 3.4 采集矩阵：22 例已全部采满（v0.8 回填）
 
-> v0.1 写的是 12 例，v0.6 按实测改成 22 例矩阵 —— 加列的每一例都对应"某个变体在日志里的表现不一样"，不是凑数。`NN_SAFE_MODE` 两次实采都发现无判别证据（O10），它的其余变体要么换成"块缺失型"，要么放弃。
+> v0.1 写的是 12 例，v0.6 按实测改成 22 例矩阵 —— 加列的每一例都对应"某个变体在日志里的表现不一样"，不是凑数。
+> v0.8 真采到 22 例（`origin=collected`）。**唯一没采满的是 `NN_SAFE_MODE`**：四次尝试（手动安全模式 ×2、块缺失背景 + 安全模式、带负载安全模式）全部**没有一条可判别的非 INFO**，全部移到 `runtime/no-evidence/`（O10 + O12）。缺的 4 个安全模式槽位由"多打几遍其余三族"补齐 —— 这是有意的取舍：宁可同一族多两个变体，也不往数据集里塞 0 证据的样本。
 
-| 族 | ID | 注入变体（`collect/inject.py` 的键） | 状态 |
+| 族 | ID | 注入变体（`collect/inject.py` 的键） | 实测（记录数 / ERROR / WARN） |
 |---|---|---|---|
-| 正常 | `base_healthy_01/02/03` | 无注入 + 读写负载（空载集群不写日志，healthy 例必须有负载） | ✅ 2/3（`_01` 1590 条 / `_02` 641 条） |
-| 正常 | `base_noise_01/02` | 良性扰动（滚动重启 DN；负载尖峰） | ✅ 1/2：`_01` = 无负载 + 窗口内重启 dn3，147 条、**ERROR 0**（V5 过）—— 负样本"重启不等于故障" |
-| 卷 | `inc_dnvol_01` | `dn_volume`：把 dn1 的 2g tmpfs 写满 4g | ✅ 已采（3200 条，证据全在 WARN） |
-| 卷 | `inc_dnvol_02` | `dn_disk_broken`：把 dn2 卷里的 `current` 换成普通文件后重启 | ✅ 已采（`ERROR=1`：`Initialization failed for Block pool`） |
-| 卷 | `inc_dnvol_03/04/05` | 只读挂载 / 删卷目录 / dn1+dn3 同时满 | ⬜ 未采 |
-| 心跳 | `inc_hb_01` | `dn_heartbeat_pause`（pause dn2） | ✅ 已采（dead≈30s，`ERROR=3` 来自 WRITE_BLOCK 超时） |
-| 心跳 | `inc_hb_02/03` | `dn_heartbeat_stop`（stop dn2）/ `dn_heartbeat_pause`（pause dn1） | ✅ 1/2：`_02` = stop dn2，2668 条、`ERROR=2`（dn1 的 `DataXceiver error processing WRITE_BLOCK` + 客户端 `Exception in createBlockOutputStream`）、WARN 83 |
-| 心跳 | `inc_hb_04/05` | 网络丢包致心跳丢失 / 停两台留一台（逼近副本不足） | ⬜ 未采 |
-| 安全模式 | `inc_safemode_01/02` | `nn_safemode`（`dfsadmin -safemode enter`），第二次带负载 | ⚠️ 两次都**无判别证据**，移到 `runtime/no-evidence/`（O10） |
-| 安全模式 | `inc_safemode_03/04` | 块缺失型（删掉某 block 的三份副本再进安全模式）/ edits 满 | ⬜ 未采（要新注入变体，破坏性操作） |
-| 网络 | `inc_net_01` | `network`（disconnect dn3 ↔ nn 网络） | ✅ 已采：`--inject-target alcp-dn3`，2480 条、`ERROR=3`（dn1/dn2 的 WRITE_BLOCK）、WARN 72（含 nn 上的客户端 `Excluding datanode`） |
-| 网络 | `inc_net_02` | `net_disconnect`（dn3 出网）+ 负载 | ✅ 已采（服务端 3 条 `DataXceiver error`、客户端 WARN 进 pack） |
-| 网络 | `inc_net_03/04/05` | 断 client↔dn / 断 dn↔dn / 高延迟 | ⬜ 未采 |
+| 正常 | `base_healthy_01/02/03` | 无注入 + 读写负载（空载集群不写日志，healthy 例必须有负载） | 1590 / 641 / 1669，**ERROR 全 0** |
+| 正常 | `base_noise_01/02` | 良性扰动：窗口内 `docker restart` 一台 DN；负载尖峰再整体停 | 147 / 1127，**ERROR 全 0**（"重启不等于故障"，V5 的分母） |
+| 卷 | `inc_dnvol_01/04/05` | `dn_volume`：dn1 的 2g tmpfs 写满 4g（fault 5 / 8 / 10 分钟） | 3200 / 4430 / 5306，**ERROR 全 0**，证据全在 WARN（`Failed to place enough replicas`） |
+| 卷 | `inc_dnvol_02/03` | `dn_disk_broken`：卷里的 `current` 换成普通文件后重启（dn2 / dn3） | 335（**ERROR=1**）/ 2998（**ERROR=7**），`Initialization failed for Block pool` |
+| 心跳 | `inc_hb_01/03/06` | `dn_heartbeat_pause`（dn2 / dn1 / dn3），dead≈30s | 1627（E3）/ 2459（E4）/ 2532（E4） |
+| 心跳 | `inc_hb_02/04/05` | `dn_heartbeat_stop`（dn2 / dn1 / dn3，fault 5 / 5 / 8 分钟） | 2668（E2）/ 2710（E2）/ 3715（E3） |
+| 网络 | `inc_net_01/03/04/05` | `network`（disconnect dn3 / dn1 / dn2 / dn3，fault 5/5/5/8 分钟） | 2480（E3）/ 2663（E2）/ 2494（E2）/ 3675（E3） |
+| 网络 | `inc_net_02` | 同 `net_disconnect`，dn3 出网 + 客户端负载 | 1586（E3，含客户端 WARN 进 pack） |
+| 网络 | `inc_net_06` | `network` 摘掉 **NameNode**（dn↔nn 全断） | 1376（**E0**，WARN 56 是真证据：`Failed to place enough replicas ... unavailableStorages`、`lease recovery`） |
+| 安全模式 | `inc_safemode_01..04` | `nn_safemode`；带负载；块缺失背景 | **四次全部无判别证据** → `runtime/no-evidence/`（O10 / O12） |
 
-**为什么当初只采 3 例**：S1 的目标是"管线通 + 端到端跑通一次"，不是"数据集齐"。采满 22 例 ≈ 9 小时纯采集 + 22 次环境重置，会把 S1 的 3 天吃掉一天半。**先打通，再按矩阵补**——这也让"续采"能力有真实用武之地（同一 case 分两次采）。
+**为什么当初只采 3 例（v0.1 的账）**：S1 的目标是"管线通 + 端到端跑通一次"，不是"数据集齐"。采满 22 例 ≈ 9 小时纯采集 + 22 次环境重置，会把 S1 的 3 天吃掉一天半。**先打通，再按矩阵补** —— v0.8 补完的 22 例共花约 4 小时（每例 9–14 分钟，含自动标注与 `pack-lint` 复查）。
 
 ### 3.5 正常基线为什么必须单独采
 
@@ -402,16 +400,16 @@ data/cases/<case_id>/
 
 ---
 
-### 7.1 当前实况（v0.7 回填，2026-11-23 真跑）
+### 7.1 当前实况（v0.8 回填，2026-11-23 真跑）
 
 | 验收项 | 命令 | 最近一次结果 |
 |---|---|---|
-| V1 | `make pack-lint` | **141 个 pack，0 个有问题** |
-| V2 | `make verify-collect` | **132/132 一致**（9 例新采不参与比对：时间戳每次采集都变，冻进基准等于把"重采一次"变成回归失败） |
+| V1 | `make pack-lint` | **154 个 pack，0 个有问题** |
+| V2 | `make verify-collect` | **132/132 一致**（22 例新采不参与比对：时间戳每次采集都变，冻进基准等于把"重采一次"变成回归失败） |
 | V3 | `make verify-gates ARGS="--v3 A B"` | 通过（同一批起点、一次采完 vs 中断后 attach，内容多重集合与 counters 全等） |
 | V4 | `make verify-gates ARGS="--v4"` | 通过：nn/dn1/dn2/dn3 四条主流**逐字节相同**（各 64 KiB 区间比对） |
-| V5 | `make pack-lint CASE=base_healthy_01 CHECK=levels` | 通过（`ERROR == 0`）；负样本 `base_noise_01`（窗口内重启 dn3、无在途写）同样 `ERROR == 0` |
-| V6 | `make pack-lint CASE=inc_dnvol_02 CHECK=levels` | 通过（`ERROR=1` 来自 DN 启动失败；`inc_dnvol_01` 走 WARN 证据）；`inc_net_01`（`ERROR=3`）、`inc_hb_02`（`ERROR=2`）同样通过 |
+| V5 | `make pack-lint CASE=base_healthy_01 CHECK=levels` | 通过（`ERROR == 0`）；负样本 `base_noise_01/02`（窗口内重启 dn3、负载尖峰）同样 `ERROR == 0` |
+| V6 | `make pack-lint CASE=<每例> CHECK=levels` | **22 例逐例通过**：`inc_dnvol_02`（E1）、`inc_dnvol_03`（E7）、`inc_hb_0x`（E2–E4）、`inc_net_0x`（E2–E3）、`inc_dnvol_01/04/05`（E0，走 WARN 证据） |
 | V7 | `make verify-gates ARGS="--v7 --live"` | 通过（容器 4 个在跑、安全模式 OFF、Live DN=3、无 `lab.fill` 残留） |
 | V8 | 同上（`counters.redacted`） | 通过（新采例 `ip`/`path` 两类 > 0；迁移例命中已有占位符为 0，不算失败） |
 | V9 | `pytest -k lab` | 通过（语法 A / B / 带前缀续行） |
@@ -530,7 +528,7 @@ data/cases/<case_id>/
 | **O7** | docker adapter 是否实现 `docker logs --since` 取 stdout | 实现 / 不实现 | **已闭环：不实现**。它给不出字节偏移，续采必猜，V3 失守；stdout 改由 §2 的 `tee` 落盘，复用同一条 `tail -c` 语义（一进 §6.1、A-R1） |
 | **O8** | 是否采 `gc.log` | 采 / 不采 | **已闭环：不采**（v0.3 改）。Java 8 的 GC 行 `2026-11-22T11:46:27.166+0000: ...` 既不符 `hdfs_log4j` 也不符 `lab`，续行判据会把它整段拼进最后一条 DataNode 日志。要收它得先加 `jvm_gc` 档位 |
 | **O9** | 服务端 ERROR 从哪来 | — | **已闭环**：HDFS 服务端 ERROR 基本只来自**启动期致命失败**（`DiskChecker$DiskErrorException` / `Failed to acquire lock` / `Initialization failed for Block pool`）。运行期故障只打 WARN，所以 V6 改成"非 INFO >= 1"（§7） |
-| **O10** | `NN_SAFE_MODE` 造不出非 INFO | — | **已知空洞**：见 §7 下方说明，P-E 必须按"只有 INFO"来算这一族 |
+| **O10** | `NN_SAFE_MODE` 造不出非 INFO | — | **已知空洞（四次实证）**：手动 enter（空载 / 带负载）、块缺失背景 + 安全模式、8 分钟带负载，四例的全局 WARN 全部是 `Unexpected value for data transfer` 噪声，NN 侧非 INFO 恒为 0。根因是安全模式是**保护动作**：NN 只在拒绝写时用 INFO 说"Safe mode is ON"，真正的错误发生在客户端且被 O12 吞掉。P-E 必须按"这一族只有 INFO"来算 |
 | **O11** | `id` 的行号是"读的先后"而非内容坐标 | 现在改 / 以后改 | **以后改**：V3 因此只断言"不重不漏 + 内容一致"，不比 id 序列与 `canonical_sha256`。真要改得让 id 由「流名 + 流内偏移」派生，属于 id 格式的 schema 变更，132 个迁移 pack 与仓库根的 `tests/fixtures/verify/baseline.json` 都要重做（§7 的 O11 段有实测记录） |
 
 ---
@@ -539,10 +537,10 @@ data/cases/<case_id>/
 
 | 对端 | P-A 给什么 | P-A 要什么 |
 |---|---|---|
-| P-B 索引 | `logs.jsonl`（喂 `case_report` 语料）、`labels.json`；138 个 pack 即现成语料 | 无 |
+| P-B 索引 | `logs.jsonl`（喂 `case_report` 语料）、`labels.json`；154 个 pack 即现成语料 | 无 |
 | P-C 诊断 | `CasePack`（工具 `search_logs` / `get_event_evidence` 读它）、`anchors/index.json`（行级引用靠它）、`store/query.py` 的 `search()`（现成的确定性检索，别再造一遍） | 无 |
 | P-D 飞轮 | `labels.json` 的 `reviewer` 字段（人工标注 = 最初的金标准） | 无 |
-| P-E 评测 | **6 例真采 + 132 例迁移**（真采例有 anchors、有 metrics；迁移例两者为空） | 无 |
+| P-E 评测 | **22 例真采 + 132 例迁移**（真采例有 anchors、有 metrics；迁移例两者为空） | 无 |
 
 ---
 
@@ -550,6 +548,7 @@ data/cases/<case_id>/
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.8 | 2026-11-23 | **矩阵采满 22 例**：§3.4 重写成实测表（每族的 ID、注入变体、记录数 / ERROR / WARN），补 `inc_dnvol_03/04/05`、`inc_hb_03/04/05/06`、`inc_net_03/04/05/06`、`base_healthy_03`、`base_noise_02`；`NN_SAFE_MODE` 第四次尝试仍无判别证据（块缺失背景 + 安全模式，1826 条全是噪声 WARN），四例全部留 `runtime/no-evidence/`，**缺的 4 个槽位改由其余三族多采变体补齐**（理由写进 §3.4）。§0 计数回填（154 pack / 22 例真采 / 闸门 154-154、132-132）；§7.1 V6 改成"22 例逐例通过"；§11 接口表更正为 22 例 |
 | v0.7 | 2026-11-23 | **补样本到 9 例**：`inc_net_01`（disconnect dn3）、`inc_hb_02`（stop dn2）、`base_noise_01`（无负载 + 窗口内重启 dn3 的负样本，`ERROR=0`）三例入 `data/cases/`，安全模式第二例 `inc_safemode_02`（带负载 5 分钟）**仍然 0 条真 WARN**、移到 `runtime/no-evidence/`。新增 O12（客户端 FsShell 纯文本错误被续行吞掉，level 分布结构性看不见）；O10 补第二次实测；§3.4 矩阵、§7.1 实况、§0 计数（141 pack / 9 例真采）回填 |
 | v0.6 | 2026-11-23 | **结项版**：新增 §0 结项状态（8900 行源码 / 457 条用例 / 138 个 pack / 闸门实况 / 四件未做）；§7 新增 **V10（产物可被人查询）** 并把 V1–V10 的最近一次结果回填成 §7.1 实况表；新增 §8.3 实际交付清单（逐文件行数 + 三处有意偏差：`ports.py` 未落地、`tests/fixtures/migrate/` 改仓库根 `tests/fixtures/verify/baseline.json`、`collect/inject/*.sh` 改 `infra/hdfs/inject/`）；§10 拆成"已落进代码（O1–O5）"与"仍待拍板/已知约束（O6–O11）"；§11 接口表按实物更正（6 例真采 + 132 例迁移、向 P-C 指明 `store/query.py` 已有检索实现）。同时修正头部版本号停在 v0.3 的笔误 |
 | v0.5 | 2026-11-23 | 收口（V3 / V4 / V7 从"演示过"变成命令）：新增 `collect/gates.py` + `scripts/verify_gates.py` + `make verify-gates`。V3 的口径按实测改写成"不重不漏 + 内容多重集合一致"，**不比 `id` 序列与 `canonical_sha256`**（新记 O11：`id` 里的行号是按"读的先后"发的，崩点会让同一毫秒的平局换位）。§10 补齐 O8–O11 的闭环状态 |
