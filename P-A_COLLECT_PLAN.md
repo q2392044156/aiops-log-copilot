@@ -1,6 +1,6 @@
 # P-A 采集流水线 · 实现计划
 
-> **版本**：v0.10（2026-11-23）—— **结项版**：P-A 的代码线已全部落地，本文此后只做"事实回填"
+> **版本**：v0.11（2026-11-23）—— **结项版**：P-A 的代码线已全部落地，本文此后只做"事实回填"
 > **上游文档**：`IMPLEMENTATION_PLAN.md` v1.0 的 §4.1（P-A 段落）/ §5（CasePack 契约与目录形状）/ §7（S1 里程碑）/ §8.2（红线）
 > **本文边界**：只讲 **P-A（采集）** 这一段——采什么日志、用什么环境采、采哪些等级与窗口、A1/A2/A3 各做什么、怎么验收。
 > **不管**：窗口切分 / 模板 / 门禁 / 事件合并（那是旧项目已有的检测侧，新项目不复现）、检索与诊断（P-B / P-C）。
@@ -226,7 +226,7 @@ data/cases/<case_id>/
 
 | 来源 | `anchors/index.json` | `metrics.jsonl` | `expect` | 依据 |
 |---|---|---|---|---|
-| `origin=collected`（23 例） | 有（只覆盖证据行；`base_healthy_02` 641 条记录 → **71 条指针**） | 有（5s / 30s 一条，实测 60–420 KB） | 有（人定的门槛） | 真采，四条命令都跑过 |
+| `origin=collected`（24 例） | 有（只覆盖证据行；`base_healthy_02` 641 条记录 → **71 条指针**） | 有（5s / 30s 一条，实测 60–420 KB） | 有（人定的门槛） | 真采，四条命令都跑过 |
 | `origin=migrated`（132 例） | **空**（`entries: []`） | **0 字节** | **空**（`null`） | 旧项目只有 `evidence/logs/*.log` 与 `incident.json`；指针若指向旧路径，换台机器 clone 就悬空；旧数据也没有任何指标快照 |
 
 所以下游**不能**假设"每个 pack 都有指针 / 指标 / 门槛"：
@@ -238,8 +238,8 @@ data/cases/<case_id>/
 
 | 字段 | 规则 |
 |---|---|
-| `id` | `{component}:{line_no:05d}`。`line_no` 是**源文件内绝对物理行号**（由 offset 反算，不是读入顺序），所以续采不重号；id 里**不含 adapter**，换 adapter 不变 |
-| `ts` | UTC，ISO8601 **一律 `+00:00` 偏移**（不写 `Z`），有毫秒则保留 |
+| `id` | `{component}:{line_no:05d}`。`line_no` 由 `LineAllocator` 按"哪个流先被读"全局自增发出（**不是**内容坐标，见 §10 O11）；id 里**不含 adapter**，换 adapter 不变 |
+| `ts` | UTC，ISO8601 **一律 `+00:00` 偏移**（不写 `Z`）、**固定 3 位毫秒**。日志文本没给毫秒时按 `since` 兜底的行也截到毫秒 —— 否则同一个 pack 里会同时出现 3 位与 6 位两种写法 |
 | `level` | 闭集 `TRACE/DEBUG/INFO/WARN/ERROR/FATAL` |
 | `component` | 闭集短名 `nn` / `dn1` / `dn2` / `dn3`。容器名 `namenode→nn`、`datanode1→dn1`；旧数据 `aiops-lab-dn1→dn1` |
 | `logger` | `%c{1}` 短类名（`FSNamesystem`）或 `Class:行号` 原样；解析不出为 `null` |
@@ -258,6 +258,18 @@ data/cases/<case_id>/
  "raw":"2026-11-22 10:03:11,482 ERROR org.apache.hadoop.hdfs.server.datanode.DataNode: ...",
  "parse_status":"partial","template_id":null}
 ```
+
+`metrics.jsonl` 单行 = 一个 `MetricPoint`（**不进任何哈希**，只做证据）：
+
+| 字段 | 规则 |
+|---|---|
+| `ts` | UTC、`+00:00`、**固定 3 位毫秒**（采样时刻的微秒被截断，与 `logs.ts` 同一种写法） |
+| `kind` | 闭集 `docker_stats` / `hdfs_report` / `safemode` / `df` |
+| `component` | 闭集 `nn` / `dn1` / `dn2` / `dn3` |
+| `values` | 键值对，值可以是数字、字符串或 `null`（读不到就 `null`，不瞎填 0） |
+| `error` | **可缺省**。采不到时**只有**它、没有 `values`（`values` 与 `error` 互斥） |
+
+一行一个 `(ts, kind, component)`；实测 24 个真采 pack 共 9855 行、373 行是 `error`（容器被 pause/stop 时 `docker stats` 里没有它 —— 而这正是 `DN_HEARTBEAT` 最需要证据的时刻）。
 
 `manifest.json` 关键字段（★ = 相对总计划新增或明确）：
 
@@ -303,6 +315,33 @@ data/cases/<case_id>/
 ```
 
 迁移例的 `labels.json` 由 `incident.json` 生成：`labels.root_cause_code → root_cause`，`confidence` / `review_status` / `reviewer_id` 拼进 `notes`；`fault_injection` 恒 `null`（旧数据没有注入记录）。
+
+### 5.5 格式统一性：实测到哪一层（v0.11）
+
+不看 manifest 的自述，用一个一次性脚本（`runtime/audit_format.py`，不进库）逐字节重验了 156 个 pack：
+
+| 检查项 | 结果 |
+|---|---|
+| 文件集合 | **156/156 完全一致**：`manifest.json` / `logs.jsonl` / `metrics.jsonl` / `labels.json` / `anchors/index.json` |
+| `schema` | 156/156 = `casepack/v1` |
+| `manifest` 键集合 | 156/156 只有 **1 种**（14 键） |
+| `labels` 键集合 | 156/156 只有 **1 种**（8 键） |
+| `logs.jsonl` 行键 | **78754 行全部恰好 10 键、顺序一致** |
+| `counters` | 156/156 与盘上实际内容（行数 / 级别 / 组件 / failed）逐项对账通过 |
+| `id` | 无重复、前缀与 `component` 一致 |
+| `raw` | `ok` 行恒 `null`；非 `ok` 行必非空 |
+| 编码与换行 | 无 BOM、无 CRLF、`logs.jsonl` 末行有换行 |
+| `anchors` | `schema="anchors/v1"`；被指的 `id` 都能在 `logs.jsonl` 里找到 |
+
+**v0.11 修掉的两处不齐**：
+1. `logs.ts` 有 **4 行是 6 位微秒**（其余 78750 行 3 位）——来源是"文件第一行就是续行"时用 `since` 兜底时间戳，而迁移的 `since` 取自 `incident.json` 的 `fault_start`（带微秒）。修法：`canonicalize()` 一律把兜底时间戳截到毫秒；只重迁这 4 例（`--only … --force`），其余 128 例的 `canonical_sha256` 一字节未变，基准重冻后 `verify-collect` 132/132。
+2. `metrics.ts` 有 9838 行带微秒（17 行 3 位）——它是采样时刻，与 `logs.ts` 混在一起会让 `ts` 的字符串比较失效。修法：`MetricPoint` 构造时截到毫秒；存量 24 个 pack 的 `metrics.jsonl` 就地重写（指标不进任何哈希、也不被 `counters` 对账，是唯一可以安全重写的数据）。
+
+**仍然存在、但已写进契约的"两种形态"**（下游必须按契约处理，不要当漂移）：
+- `metrics.jsonl` 的行有 `values` 与 `error` **二选一**，`error` 可缺省；
+- pack 的 `origin` 决定 `anchors` / `metrics` / `expect` 是否为空（见上表）。
+
+**结论**：**结构层（文件、schema、键、顺序、编码、时间戳写法）已经统一**，P-B 不需要再为"格式"写兼容分支；但**语义层**的差异是数据本身，必须处理——`origin` 两种、根因族五种、体量从 1 条到 10638 条、`window.phases` 有 4 种覆盖情况。
 
 ---
 
@@ -569,6 +608,7 @@ data/cases/<case_id>/
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.11 | 2026-11-23 | **格式统一性实测与两处修正**：①新增 §5.5（156 个 pack 逐字节审计的结果表）；②`logs.ts` 的 4 行微秒（续行兜底 `since`）→ `canonicalize()` 截到毫秒，只重迁这 4 例、重冻基准后 132/132；③`metrics.ts` 微秒 → `MetricPoint` 截到毫秒，存量 24 个 pack 的 `metrics.jsonl` 就地重写 9838 行；④§5 的 `logs.jsonl` 字段表更正 `id` 的 `line_no` 语义（读序，见 O11）并补 `metrics.jsonl` 字段表；⑤`verify-collect --update-baseline` 修成**只冻结 `origin=migrated`**（新采例每个窗口的时间戳都不同，冻进退化成回归失败） |
 | v0.10 | 2026-11-23 | **补 O4 的 DEBUG 对照例**：①`log4j.properties` 的 root level 从硬编码 `INFO, RFA` 改成 `${hadoop.root.logger}`，compose 每个 service 加 `HADOOP_ROOT_LOGGER: "${HADOOP_ROOT_LOGGER:-INFO,RFA}"` —— 采对照例时 `$env:HADOOP_ROOT_LOGGER="DEBUG,RFA"; docker compose up -d`，采完 up 回默认，**不动仓库文件**；②`Collector` 新增 `config_overrides`，`scripts/collect_case.py` 新增 `--config-override KEY=VALUE`（严格拒绝无等号/空键/重复键），保证"这一例现场不同"能被事后解释；③采 `base_healthy_debug_01`（2 分钟）：10638 条（DEBUG 9949 / INFO 682 / WARN 7）、原始 15764 行、硬失败 0 条、partial 1162 条（Java 栈正确归并）、窗口外丢弃 170、`pack-lint` PASS；**同一份代码下比 INFO 档快 16.7 倍**（318 → 5319 条/分）；④`describe` 输出把"解析异常（partial+failed）"与"硬失败（failed）"分开报，避免 DEBUG 档下把正常的栈归并误读成解析器坏了；⑤§0/§3.4/§7.1 V5/§10 O4 回填（156 pack / 24 例真采） |
 | v0.9 | 2026-11-23 | **收口 1~7**：①修 O12（`FsShell` 失败行单独成条，级别 WARN、`parse_status=partial`、只对 `hdfs_log4j` 生效），132 个迁移 pack 的 `canonical_sha256` 一个字节没变；②据此补采 `inc_safemode_05`，`NN_SAFE_MODE` 从"零证据"变成"证据只在客户端"（113 条 `FsShell` WARN / 57 条明写 safe mode），O10 改判、新增 **O13**（这批行的 `ts` 是继承的，`phase_map` 不可信）；③落地 `ports.py`（`Clock` / `CaseStore`）+ `store/casestore.py`，`AnchorRef` 上移到 `domain/case.py`；④`pack_paths` 现在校验 `case_id`（`../etc` 在第一层就被拒）；⑤`adapters/wsl.py` 落成骨架（构造即失败），§6.1 / §8.3 对齐；⑥新增 `make check` / `make check-live` 一条命令跑全闸门；⑦`verify-gates --v7 --live` 增加 `Under-replicated` / `Missing` 块检查与 `--repair`（`fsck -delete`），并修掉"报告行有制表符前缀导致永远读 0"的假绿。§0 计数回填（155 pack / 23 例真采 / 480 条用例） |
 | v0.8 | 2026-11-23 | **矩阵采满 22 例**：§3.4 重写成实测表（每族的 ID、注入变体、记录数 / ERROR / WARN），补 `inc_dnvol_03/04/05`、`inc_hb_03/04/05/06`、`inc_net_03/04/05/06`、`base_healthy_03`、`base_noise_02`；`NN_SAFE_MODE` 第四次尝试仍无判别证据（块缺失背景 + 安全模式，1826 条全是噪声 WARN），四例全部留 `runtime/no-evidence/`，**缺的 4 个槽位改由其余三族多采变体补齐**（理由写进 §3.4）。§0 计数回填（154 pack / 22 例真采 / 闸门 154-154、132-132）；§7.1 V6 改成"22 例逐例通过"；§11 接口表更正为 22 例 |

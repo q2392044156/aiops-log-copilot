@@ -95,15 +95,23 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[verify-collect] {root} 下没有任何完成的 pack", file=sys.stderr)
             return 2
         fingerprints = []
+        unfreezable: list[str] = []
         for case_id in case_ids:
             paths = pack_paths(root, case_id)
             try:
-                fingerprints.append(fingerprint_pack(paths))
+                found = fingerprint_pack(paths)
             except CasePackError as exc:
                 print(f"[verify-collect] FAIL  {case_id}: {exc}", file=sys.stderr)
                 return 1
+            if found.origin != "migrated":
+                # 新采的例**不能**冻结：每个采集窗口的时间戳都不一样，
+                # 冻进基准等于把"重采一次"变成回归失败（`verify()` 里同样跳过）。
+                unfreezable.append(case_id)
+                continue
+            fingerprints.append(found)
         written = save_baseline(baseline_path, fingerprints)
-        print(f"[verify-collect] 已冻结 {written} 例 → {baseline_path}")
+        note = f"，跳过 {len(unfreezable)} 例 collected（不可冻结）" if unfreezable else ""
+        print(f"[verify-collect] 已冻结 {written} 例{note} → {baseline_path}")
         return 0
 
     try:

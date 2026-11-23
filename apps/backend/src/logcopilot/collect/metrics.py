@@ -140,6 +140,13 @@ class MetricPoint:
 
     def __post_init__(self) -> None:
         require_utc(self.ts, "MetricPoint.ts")
+        # 精确到毫秒，**不保留微秒**：`logs.jsonl` 的 `ts` 来自日志文本，天生只有
+        # 毫秒，而这里的 `ts` 是 `datetime.now()` 的采样时刻，带微秒。一个 pack
+        # 里两种精度混着，`ts` 的字符串比较（排序、区间过滤）会在 "." 与 "+"
+        # 处给出反直觉结果。截断而不是四舍五入：只减不增，采样顺序不变。
+        object.__setattr__(
+            self, "ts", self.ts.replace(microsecond=self.ts.microsecond // 1000 * 1000)
+        )
         if self.kind not in METRIC_KINDS:
             raise ValueError(f"kind 必须是 {METRIC_KINDS} 之一，收到 {self.kind!r}")
         if self.component not in COMPONENTS:

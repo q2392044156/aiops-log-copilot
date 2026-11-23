@@ -269,6 +269,19 @@ def test_orphan_continuation_at_start_uses_since() -> None:
     assert record.message == "  orphan tail without head"
 
 
+def test_orphan_timestamp_is_truncated_to_milliseconds() -> None:
+    """兜底时间戳必须截到毫秒 —— 否则同一 pack 里会出现两种 `ts` 精度。
+
+    实测来源：132 例里有 4 例的首行就是续行，兜底用的 `since` 来自
+    `incident.json` 的 `fault_start`，带微秒（`...:25.053403`），于是那 4 个
+    pack 的 `logs.jsonl` 里各有一行 `ts` 是 6 位小数，其余全是 3 位。
+    """
+    since = datetime(2026, 11, 11, 8, 0, 0, 53403, tzinfo=UTC)
+    result = run_lines(["  orphan tail without head"], since=since)
+    assert result.records[0].ts == datetime(2026, 11, 11, 8, 0, 0, 53000, tzinfo=UTC)
+    assert result.records[0].to_json_line().count(".053+00:00") == 1
+
+
 def test_line_without_prefix_is_treated_as_continuation() -> None:
     """lab profile 下没有 `[comp] ` 前缀的行，归并到上一条，而不是造新记录。"""
     result = run_lines(

@@ -328,6 +328,15 @@ def canonicalize(
     """
     require_utc(since, "since")
 
+    # `since` 只会用来给"文件第一行就是续行"的孤儿兜底时间戳，所以它最终会写进
+    # `LogRecord.ts`。契约规定 `logs.jsonl` 的 `ts` 是 **3 位毫秒**（见 P-A §5），
+    # 而调用方给的 `since` 可能带微秒 —— 迁移时它来自 `incident.json` 的
+    # `fault_start` / `first_observable_signal`（形如 `...:25.053403`）。
+    # 不截断的话，同一个 pack 里会出现 `...25.053403+00:00` 与 `...25.053+00:00`
+    # 两种写法：ISO-8601 都合法，但字符串比较（排序、去重、`id` 对账）会在
+    # "." 与 "+" 处给出反直觉结果。截断而不是四舍五入：只减不增，顺序不变。
+    since = since.replace(microsecond=since.microsecond // 1000 * 1000)
+
     groups: list[_Group] = []
     raw_line_count = 0
 
