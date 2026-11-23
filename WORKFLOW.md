@@ -15,11 +15,13 @@
 容器/文件里的原始字节
     │
     ▼
-【节点 0】取数 —— collect/adapters/base.py + file.py
+【节点 0】取数 —— collect/adapters/base.py + file.py + docker.py
     │  把字节变成 (line_no, text) 流，喂给节点 1
     │  base.py 定义协议 + 核心编舞者 ComponentReader
-    │  file.py 是第一个真实实现（bind mount 读磁盘）
-    ▼  (collect/adapters/base.py + file.py)
+    │  file.py 从 bind mount 读磁盘 → 路径 A
+    │  docker.py 从 docker exec 读容器内文件 → 路径 B
+    │  两条路径产出的字节必须完全一致（V4 红线）
+    ▼  (collect/adapters/base.py + file.py + docker.py)
 【节点 1】翻译 + 脱敏
     │  把原始文本行翻译成 LogRecord 对象（canonical.py）
     │  三步：剥前缀抠字段 → 续行拼接 → 隐私擦除（redact.py）
@@ -67,37 +69,60 @@
 
 ## 第二板块：节点详解
 
-### 节点 0：取数 —— `collect/adapters/base.py` + `collect/adapters/file.py`
+### 节点 0：取数 —— `collect/adapters/base.py` + `file.py` + `docker.py`
 
-**一句话**：日志采集的"水管总表"——`base.py` 定义协议和核心调度器，`file.py` 是第一个真实实现（从磁盘 bind mount 读 Hadoop 日志）。未来的 `docker.py` 会按同一套协议从 `docker exec cat` 读，两条路径产出的字节**必须完全一致**。
+**一句话**：日志采集的"水管总表"——`base.py` 定义协议和核心调度器，`file.py` 从 bind mount 读磁盘（路径 A），`docker.py` 从 `docker exec` 读容器内文件（路径 B）。两条路径产出的字节**必须完全一致**，这是 V4 红线。
 
-**为什么先有协议、后有实现**：P-A 要两条**完全等价**的取数路径（`file` 直接读挂载的日志文件、`docker` 通过 `docker logs` 读容器输出）。V4 的红线是"两条路径产出的 `canonical_sha256` 必须相等"——翻译成代码就是：**流水线后半段（canonicalize / package）一行都不许知道日志是从哪来的**。
+**为什么先有协议、后有实现**：P-A 要两条**完全等价**的取数路径。V4 的红线是"两条路径产出的 `canonical_sha256` 必须相等"——翻译成代码就是：**流水线后半段（canonicalize / package）一行都不许知道日志是从哪来的**。
 
 #### base.py 做了什么（6 个核心部件）
 
 | 部件 | 作用 |
 |---|---|
 | **StreamSpec** | 一条物理日志流的"身份证"——属于哪个组件（`nn/dn1/dn2/dn3`）、叫啥名（`main/gc/audit/stdout`）、读取先后顺序（写死 `order`，不靠目录遍历或文件时间）、物理路径 |
-| **StreamReader（Protocol）** | "怎么从一条流里读"的接口——`file` 适配器读磁盘文件、`docker` 适配器跑 `docker exec cat`，各自实现这个 Protocol |
-| **SourceAdapter（Protocol）** | "一种取数方式"的接口——`streams()` 列出所有流、`open(spec)` 打开一条流。file 和 docker 各有一个 SourceAdapter 实例 |
+| **StreamReader（Protocol）** | "怎么从一条流里读"的接口——`FileReader` 读磁盘、`DockerReader` 跑 `docker exec tail -c`，各自实现这个 Protocol |
+| **SourceAdapter（Protocol）** | "一种取数方式"的接口——`streams()` 列出所有流、`open(spec)` 打开一条流。file 和 docker 各有一个实例 |
 | **ComponentReader** ⭐ | **最核心的编舞者**——把一个组件的多条流（主日志 + GC + audit）按 `StreamSpec.order` 顺序依次读完，编成**一条连续编号**的行流喂给 canonical.py。没有它 id 会在多条流之间撞号 |
-| **LineAllocator** | 给多条流分配连续 `line_no`——起点是"checkpoint 里所有流的最大值 + 1"，不是每条流自己从 1 起。续采时如果 GC 日志上次读到了 line_no=520，这次主日志就从 521 开始编 |
+| **LineAllocator** | 给多条流分配连续 `line_no`——起点是"checkpoint 里所有流的最大值 + 1"，不是每条流自己从 1 起 |
 | **CheckpointMismatch + line_sha1** | 续采安全双重校验——inode 变了（日志轮转、容器重建）或 offset 前最后一行 sha1 对不上（文件被截断或改写）都抛异常，绝不"猜着接着读" |
 
-#### file.py 做了什么（第一个真实实现）
+#### file.py（路径 A：bind mount 读磁盘）
 
-**物理基础**：Hadoop 容器的 `/opt/hadoop/logs` 通过 bind mount 落到 `runtime/hdfs-logs/<container>/`——同一份日志既是容器里的文件也是宿主机上的文件。`file` 和 `docker` 读的是**同一批字节**，这就是 V4 的物理基础。
+**物理基础**：Hadoop 容器的 `/opt/hadoop/logs` 通过 bind mount 落到 `runtime/hdfs-logs/<container>/`——同一份日志既是容器里的文件也是宿主机上的文件。
 
 | 类 / 函数 | 作用 |
 |---|---|
-| **FileStream** | 一条流的"声明"——用 glob pattern（如 `hadoop-hdfs-datanode-*.log`）定位文件，hostname 用 `*` 挡住（容器启动时随机变）。pattern 只准用 `*.log` 这种窄的，不准 `*.log*`（会命中轮转出来的 `.log.1`，触发 `AmbiguousStream`） |
-| **hdfs_streams()** | 预定义的 Hadoop 默认日志布局：每个组件声明 main → audit → gc → stdout 四条流，order 写死 |
-| **FileAdapter** | 实现 `SourceAdapter`——`streams()` 解析 glob 产出 StreamSpec 列表（匹配不到就跳过，匹配多个就报 AmbiguousStream），`open(spec)` 创建 FileReader |
-| **FileReader** | 实现 `StreamReader`——按 offset 从磁盘读文件。**三条边界**：半行不消费（文件最后一行没换行符可能是正在写的）、轮转/截断抛 CheckpointMismatch、文件不存在不算错（容器刚起时日志可能还没写） |
-| **_decode_line()** | 一行字节 → 文本：先去 `\n`、再去 `\r`（兼容 CRLF）、最后 UTF-8 decode 用 `errors="replace"`（日志里混非 UTF-8 字节是常态） |
-| **sha256_file_head()** | 读文件前 N 字节的 sha256——`input_fingerprint` 的原料之一（future collect.py 会用） |
+| **FileStream** | 一条流的"声明"——用 glob pattern（`hadoop-hdfs-datanode-*.log`）定位，hostname 用 `*` 挡住。不准写 `*.log*`（会命中轮转的 `.log.1`） |
+| **hdfs_streams()** | 预定义的 Hadoop 默认日志布局：每个组件 main → audit → gc → stdout，order 写死 |
+| **FileAdapter** | `SourceAdapter` 实现——`streams()` 解析 glob 产出 StreamSpec，`open(spec)` 创建 FileReader |
+| **FileReader** | `StreamReader` 实现——`seek(offset)` + `readline()` 按字节读。半行不消费、轮转/截断抛异常、文件不存在跳过 |
+| **_decode_line()** | 一行字节 → 文本：去 `\n` → 去 `\r` → UTF-8 decode 用 `errors="replace"` |
+| **sha256_file_head()** | 读文件前 N 字节的 sha256——`input_fingerprint` 的原料 |
 
-#### ComponentReader 工作流
+#### docker.py（路径 B：docker exec 读容器内文件）
+
+**为什么不用 `docker logs`**：`docker logs` 只能按时间戳 `--since`，给不出字节偏移——续采会变成"猜时间戳"，V3（不重不漏）立即失守。所以这里**把 docker 当作远端文件系统**，用三条命令模拟文件操作：
+
+| 本地文件操作 | docker.py 等价命令 |
+|---|---|
+| `os.stat()`（拿 inode / size） | `docker exec <c> stat -c '%i %s' <path>` |
+| `seek(offset)` + 逐行读 | `docker exec <c> tail -c +<offset+1> <path>` |
+| 读 offset 前一行做校验 | `docker exec <c> sh -c "tail -c +<start> <path> \| head -c <len>"` |
+
+**`tail -c +N` 是 1 起的字节位置**，所以偏移 `offset` 对应 `+offset+1`——这就是 FileReader 和 DockerReader 能**逐字节对齐**的秘密。
+
+| 类 / 函数 | 作用 |
+|---|---|
+| **SubprocessRunner** | 执行 `docker` 命令的 runner——有 60 秒超时，防止容器卡死时采集器挂住。抽成可注入的，测试不依赖真 Docker |
+| **DockerStream** | 一条流的声明——与 FileStream 唯一区别是 pattern 不带子目录（docker 适配器一个实例只服务一个容器） |
+| **container_streams()** | 一个容器的默认布局——main → audit（只有 nn 有）→ gc → stdout，和 hdfs_streams() 一一对应 |
+| **DockerAdapter** | `SourceAdapter` 实现——`streams()` 通过 `docker exec ls` 列目录再 fnmatch 匹配，`open(spec)` 创建 DockerReader |
+| **DockerReader** | `StreamReader` 实现——**与 FileReader 逻辑逐字对应**（抄不是偷懒，是要求）：同样的三重校验、同样的半行跳过、同样的 line_sha1。唯一区别是数据来源换成了 `tail -c +N` |
+| **DockerCommandError** | docker 工具链坏了（容器不存在、docker 没装、超时）——和 CheckpointMismatch 区分开（后者是数据不可信，重试没用；前者重试可能有用） |
+
+**stdout 为什么不单独走 `docker logs`**：Hadoop 的 stdout 基本为空，而且 `docker logs` 无法按字节续采。第 12 步的 compose 里让 stdout 也落成文件（`... 2>&1 | tee /opt/hadoop/logs/<component>.out`）——**一个 adapter 只有一种取数语义**，比多一个"特例"更稳。
+
+#### ComponentReader 工作流（两条路径通用）
 
 ```
 ComponentReader(adapter, "dn1", checkpoint)
@@ -107,20 +132,22 @@ ComponentReader(adapter, "dn1", checkpoint)
     │
     ▼
 for spec in sorted_specs:
-    reader = adapter.open(spec)          # file.py 里是 FileReader(spec)
-    for _phys_no, text in reader.read(): # 从磁盘按 offset 读，跳过半行
+    reader = adapter.open(spec)          # file.py → FileReader(spec)
+                                         # docker.py → DockerReader(spec, container, runner)
+    for _phys_no, text in reader.read(): # file: seek(offset)+readline()
+                                         # docker: tail -c +<offset+1>
         line_no = allocator.take()       # 分配全局连续编号
         yield line_no, text              # 喂给 canonicalize()
     checkpoint()                         # 记录 inode + offset + tail_line_sha1
 ```
 
-#### FileReader 续采三重校验
+#### 续采三重校验（FileReader 和 DockerReader 逐字相同）
 
 上次采到 offset=5000，inode=12345，tail_line_sha1=abc123 → 这次续采：
 
 ```
 ① inode 变了？
-   12345 ≠ 当前文件 inode → 文件被轮转/容器重建 → 抛 CheckpointMismatch
+   12345 ≠ 当前 inode → 文件被轮转/容器重建 → 抛 CheckpointMismatch
 
 ② offset > 文件当前大小？
    5000 > size → 文件被 truncate → 抛 CheckpointMismatch
@@ -129,14 +156,14 @@ for spec in sorted_specs:
    tail_before(5000) ≠ abc123 → 文件被改写过 → 抛 CheckpointMismatch
 ```
 
-三个都对得上才继续读。**半行永远不消费**——文件末尾没 `\n` 就当这行不存在，offset 停在它前面，下次再来检查。
+三个都对得上才继续读。**半行永远不消费**——末尾没 `\n` 就当这行不存在，offset 停在它前面。
 
 #### 两条不变式（适配器必须守住）
 
 | 不变式 | 直白解释 |
 |---|---|
-| **不重不漏** | 续采三重校验（inode / size / sha1）全过才继续。猜错要么读重了要么读漏了，V3「续采不重不漏」直接挂 |
-| **编号与 adapter 无关** | StreamSpec.order 写死了顺序，ComponentReader 按读入顺序给全局编号。所以 file 和 docker **一定产出同一套 line_no**——这是 V4「两条路径哈希相等」的前提 |
+| **不重不漏** | 续采三重校验全过才继续。猜错要么读重了要么读漏了，V3 直接挂 |
+| **编号与 adapter 无关** | StreamSpec.order 写死了顺序，ComponentReader 按读入顺序给全局编号。所以 file 和 docker **一定产出同一套 line_no**——这是 V4 的前提 |
 
 **产出**：`iter[(line_no, text)]` —— 连续编号的原始行流，直接喂给 `canonicalize()`。
 
@@ -380,6 +407,7 @@ P-B / P-C / P-E 各写一遍读逻辑，就是三份会各自漂移的解析器�
 | `apps/backend/tests/collect/test_redact.py` | ~260 行 | 测脱敏规则的匹配、幂等、计数留账 |
 | `apps/backend/tests/collect/test_adapters_base.py` | ~330 行 | 测 ComponentReader 的连续编号、续采 checkpoint、StreamSpec 校验 |
 | `apps/backend/tests/collect/test_adapters_file.py` | ~280 行 | 测 FileReader 的续采三重校验、半行跳过、inode 变更检测 |
+| `apps/backend/tests/collect/test_adapters_docker.py` | ~400 行 | 测 DockerReader 的三重校验（用 Mock Runner 不依赖真 Docker）、tail -c 字节偏移对齐 |
 | `apps/backend/tests/fixtures/logs/hdfs_log4j.log` | 8 行 | fixture — 标准 Hadoop log4j 格式样例日志 |
 | `apps/backend/tests/fixtures/logs/lab_syntax_a.log` | 9 行 | fixture — 实验室风格样例日志 A（旧数据格式） |
 | `apps/backend/tests/fixtures/logs/lab_syntax_b.log` | 8 行 | fixture — 实验室风格样例日志 B（旧数据格式） |
