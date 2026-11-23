@@ -17,7 +17,7 @@ PY      := $(UV) run --project $(BACKEND) python
 ARGS    ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint fmt type test pack-lint verify-collect verify-gates collect annotate annotate-check ask check check-live
+.PHONY: help install lint fmt type test pack-lint verify-collect verify-gates collect annotate annotate-check ask-case check check-live
 
 help:
 	@echo 用法: make 目标   [ARGS=附加参数]
@@ -33,7 +33,7 @@ help:
 	@echo   verify-gates    收口闸门 V3/V4/V7：make verify-gates ARGS="--v4"
 	@echo   collect         采一个病例：make collect CASE=base_healthy_01 ARGS="--minutes 5"
 	@echo   annotate        补标注：make annotate CASE=inc_dnvol_01 ARGS="--from-measurements"
-	@echo   ask             对一个 pack 做关键词检索：make ask CASE=xxx ARGS="-k Excluding"
+	@echo   ask-case        对一个 pack 做关键词检索：make ask-case CASE=xxx ARGS="-k Excluding"
 
 # ---------------------------------------------------------------------------
 # 基础三件套
@@ -92,12 +92,12 @@ verify-gates:
 	$(PY) scripts/verify_gates.py $(ARGS)
 
 # ---------------------------------------------------------------------------
-# ask：命令行问答入口（P-A §8.2 的"最小闭环"）
+# ask-case：对一个 pack 做关键词检索（P-A §8.2 的"最小闭环"）
 #
 # 检索逻辑在 `store/query.py`（可被测试直接调用），这个目标只负责把
 # `CASE=` 与 `ARGS=` 拧成 argv。命中 0 条不是错误 —— 那是查询该给的答案。
 # ---------------------------------------------------------------------------
-ask:
+ask-case:
 	$(PY) scripts/ask.py $(if $(CASE),--case $(CASE),) $(ARGS)
 
 # ---------------------------------------------------------------------------

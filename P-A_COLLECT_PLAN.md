@@ -1,6 +1,6 @@
 # P-A 采集流水线 · 实现计划
 
-> **版本**：v0.11（2026-11-23）—— **结项版**：P-A 的代码线已全部落地，本文此后只做"事实回填"
+> **版本**：v0.12（2026-11-23）—— **结项版**：P-A 的代码线已全部落地，本文此后只做"事实回填"
 > **上游文档**：`IMPLEMENTATION_PLAN.md` v1.0 的 §4.1（P-A 段落）/ §5（CasePack 契约与目录形状）/ §7（S1 里程碑）/ §8.2（红线）
 > **本文边界**：只讲 **P-A（采集）** 这一段——采什么日志、用什么环境采、采哪些等级与窗口、A1/A2/A3 各做什么、怎么验收。
 > **不管**：窗口切分 / 模板 / 门禁 / 事件合并（那是旧项目已有的检测侧，新项目不复现）、检索与诊断（P-B / P-C）。
@@ -434,7 +434,7 @@ data/cases/<case_id>/
 | V7 | 可逆 | 每个 inject 脚本执行 `_restore.sh` 后跑 | `dfsadmin -report` 的 Live DN 数回到 3；`safemode get` 回 OFF |
 | V8 | 脱敏有账 | 任意样例 | `counters.redacted` 四类字段齐全，`ip`/`path` 两类 > 0 且与 `grep` 抽查一致；旧数据命中已有占位符时为 0 且**不算失败** |
 | V9 | 旧两种语法都能解析 | `pytest tests/collect/ -k lab` | 语法 A / 语法 B / 带前缀续行 三类 fixture 全部 `ok` 或 `partial`，`failed == 0` |
-| V10 | 产物可被人查询（v0.6 新增） | `make ask CASE=inc_dnvol_02 ARGS="--level ERROR"` | 命中行按 `anchors` 回读出**原始字节**；指针不可用时必须打印原因（文件没了 / 偏移越界 / sha256 对不上），不许静默当成"没有原文"；`--json` 的字段集合稳定 |
+| V10 | 产物可被人查询（v0.6 新增） | `make ask-case CASE=inc_dnvol_02 ARGS="--level ERROR"` | 命中行按 `anchors` 回读出**原始字节**；指针不可用时必须打印原因（文件没了 / 偏移越界 / sha256 对不上），不许静默当成"没有原文"；`--json` 的字段集合稳定 |
 
 
 > **V2 的基准从哪来（v0.1 漏了）**：旧 132 例的 `evidence/logs/*.log` 实测只有 2–993 行，而 `data/processed/*/logs.parquet` 是旧项目的全量语料、**不是这 132 例的切片**。所以"全等"不能拿新解析器自己当参照。现在的做法是两层：①`store/verify.py` 用**独立第二实现**只读 `logs.jsonl` 文本重算（不 import `domain.log`、不调 `casepack` 的计算函数），与生产者只共享契约；②把通过时的指纹冻结进 `tests/fixtures/verify/baseline.json`，此后任何一例的任何数字变化都算失败，必须显式 `--update-baseline` 并让基准 diff 出现在提交里。V9 是 V2 的前置检查。
@@ -468,7 +468,7 @@ data/cases/<case_id>/
 | V7 | `make verify-gates ARGS="--v7 --live"` | 通过（容器 4 个在跑、安全模式 OFF、Live DN=3、无 `lab.fill` 残留、`Under-replicated`/`Missing` 块均为 0） |
 | V8 | 同上（`counters.redacted`） | 通过（新采例 `ip`/`path` 两类 > 0；迁移例命中已有占位符为 0，不算失败） |
 | V9 | `pytest -k lab` | 通过（语法 A / B / 带前缀续行） |
-| V10 | `make ask ...` | 通过（`base_healthy_02` 的 71 条指针逐条回读自洽；三种悬空原因都能打印） |
+| V10 | `make ask-case ...` | 通过（`base_healthy_02` 的 71 条指针逐条回读自洽；三种悬空原因都能打印） |
 
 ---
 
@@ -524,7 +524,7 @@ data/cases/<case_id>/
 | `store/casepack.py` | 660 | ✅ 读写 + `finalize` + `audit` / `audit_levels` + 两个哈希 + anchors + `checkpoint.json` sidecar；`pack_paths` 现在校验 `case_id`（`../etc` 会在第一层被拒，不再伪装成"没采完"） |
 | `store/casestore.py` | 83 | ✅ `ports.CaseStore` 的磁盘实现（**v0.9 新增**）：只列完成的 pack、无 anchors 时返回空、不缓存 |
 | `store/verify.py` | 356 | ✅ V2 的独立第二实现 + 冻结基准（**v0.1 没规划**：原计划把核验塞在 `scripts/` 里，实测发现"逻辑要在库里才能被测试直接调"） |
-| `store/query.py` | 429 | ✅ `make ask` 的检索与报告（**v0.1 没规划**，只写了 `scripts/ask.py`） |
+| `store/query.py` | 429 | ✅ `make ask-case` 的检索与报告（**v0.1 没规划**，只写了 `scripts/ask.py`） |
 | `collect/canonical.py` | 512 | ✅ 两个 profile + 剥前缀 + 续行归并 + **v0.9 的 O12 修复**（`FsShell` 失败行单独成条，级别 WARN） |
 | `collect/redact.py` | 251 | ✅ 四类规则 + 哨兵幂等 + 计数 |
 | `collect/adapters/base.py` | 399 | ✅ 协议 + `ComponentReader`（统一发号 + mid-stream checkpoint） |
@@ -608,6 +608,7 @@ data/cases/<case_id>/
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.12 | 2026-11-23 | **改名一处**：`make` 目标 `ask` → `ask-case`（P-A 的 `make ask` 与 P-B 的 `make ask Q=` 撞名，P-B 需要 `ask` 这个名字；脚本仍是 `scripts/ask.py`，行为不变）。同步 §7 V10 的两处命令与 §8.3 的说明 |
 | v0.11 | 2026-11-23 | **格式统一性实测与两处修正**：①新增 §5.5（156 个 pack 逐字节审计的结果表）；②`logs.ts` 的 4 行微秒（续行兜底 `since`）→ `canonicalize()` 截到毫秒，只重迁这 4 例、重冻基准后 132/132；③`metrics.ts` 微秒 → `MetricPoint` 截到毫秒，存量 24 个 pack 的 `metrics.jsonl` 就地重写 9838 行；④§5 的 `logs.jsonl` 字段表更正 `id` 的 `line_no` 语义（读序，见 O11）并补 `metrics.jsonl` 字段表；⑤`verify-collect --update-baseline` 修成**只冻结 `origin=migrated`**（新采例每个窗口的时间戳都不同，冻进退化成回归失败） |
 | v0.10 | 2026-11-23 | **补 O4 的 DEBUG 对照例**：①`log4j.properties` 的 root level 从硬编码 `INFO, RFA` 改成 `${hadoop.root.logger}`，compose 每个 service 加 `HADOOP_ROOT_LOGGER: "${HADOOP_ROOT_LOGGER:-INFO,RFA}"` —— 采对照例时 `$env:HADOOP_ROOT_LOGGER="DEBUG,RFA"; docker compose up -d`，采完 up 回默认，**不动仓库文件**；②`Collector` 新增 `config_overrides`，`scripts/collect_case.py` 新增 `--config-override KEY=VALUE`（严格拒绝无等号/空键/重复键），保证"这一例现场不同"能被事后解释；③采 `base_healthy_debug_01`（2 分钟）：10638 条（DEBUG 9949 / INFO 682 / WARN 7）、原始 15764 行、硬失败 0 条、partial 1162 条（Java 栈正确归并）、窗口外丢弃 170、`pack-lint` PASS；**同一份代码下比 INFO 档快 16.7 倍**（318 → 5319 条/分）；④`describe` 输出把"解析异常（partial+failed）"与"硬失败（failed）"分开报，避免 DEBUG 档下把正常的栈归并误读成解析器坏了；⑤§0/§3.4/§7.1 V5/§10 O4 回填（156 pack / 24 例真采） |
 | v0.9 | 2026-11-23 | **收口 1~7**：①修 O12（`FsShell` 失败行单独成条，级别 WARN、`parse_status=partial`、只对 `hdfs_log4j` 生效），132 个迁移 pack 的 `canonical_sha256` 一个字节没变；②据此补采 `inc_safemode_05`，`NN_SAFE_MODE` 从"零证据"变成"证据只在客户端"（113 条 `FsShell` WARN / 57 条明写 safe mode），O10 改判、新增 **O13**（这批行的 `ts` 是继承的，`phase_map` 不可信）；③落地 `ports.py`（`Clock` / `CaseStore`）+ `store/casestore.py`，`AnchorRef` 上移到 `domain/case.py`；④`pack_paths` 现在校验 `case_id`（`../etc` 在第一层就被拒）；⑤`adapters/wsl.py` 落成骨架（构造即失败），§6.1 / §8.3 对齐；⑥新增 `make check` / `make check-live` 一条命令跑全闸门；⑦`verify-gates --v7 --live` 增加 `Under-replicated` / `Missing` 块检查与 `--repair`（`fsck -delete`），并修掉"报告行有制表符前缀导致永远读 0"的假绿。§0 计数回填（155 pack / 23 例真采 / 480 条用例） |
