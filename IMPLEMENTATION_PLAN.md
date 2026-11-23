@@ -1,6 +1,6 @@
 # aiops-log-copilot 总体计划（全景）
 
-> **版本** v1.0（全景版）｜ **日期** 2026-11-22 ｜ **状态** 方向已定，进入 P-A 详细设计
+> **版本** v1.1（全景版）｜ **日期** 2026-11-23 ｜ **状态** P-A 已结项，进入 P-B 索引
 > **目标岗位** AI 应用开发 / LLM 应用工程
 > **项目根** `E:\project\my_project1\aiops-log-copilot`
 > **参照项目**
@@ -39,7 +39,7 @@
 | 应用 | FastAPI + Vue3，`make dev` 起服务 | 浏览器里能走完"贴日志 → 出报告 → 人审改判" |
 | 数据资产 | `data/cases/` 的 CasePack（新采 + 132 例迁移） | 指纹可重放、`132/132` 一致 |
 | 评测资产 | `eval/` + 7 个数字 + 6 个对照实验 | `make eval` 一屏出全部数字 |
-| 知识资产 | Milvus 2 万 chunk（5 类语料） | `recall@5 ≥ 0.80` |
+| 知识资产 | Milvus ~2000 chunk（4 层语料） | `recall@5 ≥ 0.80` |
 
 ### 1.3 三个不变量（所有设计让步于这三条）
 
@@ -54,8 +54,8 @@
 | 流水线阶段 | 5（P-A 采集 / P-B 索引 / P-C 诊断 / P-D 回流 / P-E 评测） |
 | 诊断图节点 | 11 |
 | 工具 | 6 个内置 + 若干 MCP 外部工具 |
-| 知识库 | 2 万 chunk，5 类语料 |
-| 案例 | 132 例旧数据迁移 + 3 例新采（S1）→ 12 例（S6 前） |
+| 知识库 | ~2000 chunk，4 层语料（case_card / mechanism / runbook + 补充 legacy_kb / template） |
+| 案例 | 132 例旧数据迁移 + 24 例真采（4 族 + 负样本 + DEBUG 对照） |
 | 评测 | 7 个数字 + 2 条红线 + 6 个对照实验 |
 | 工期 | 27.5 天（交付线）/ ≈42 天（学习线） |
 
@@ -65,7 +65,7 @@
 
 ### 2.1 起点：旧项目能跑，但学不进去
 
-`aiops-fault-diagnosis-agent` 由 AI 一次性生成。它的**护城河是真的**（132 例真实案例、104 张根因卡、四层评测口径、severity-first 门禁），但结构与信心都有问题：
+`aiops-fault-diagnosis-agent` 由 AI 一次性生成。它的**护城河是真的**（132 例真实案例、104 篇知识文档（154/416 chunk）、48 张生成卡、四层评测口径、severity-first 门禁），但结构与信心都有问题：
 
 | 现象 | 证据 |
 |---|---|
@@ -144,7 +144,7 @@
 | 阶段 | 一句话职责 | 关键输入 | 关键产出 | 工期 |
 |---|---|---|---|---|
 | **P-A** 采集 | 把真实环境的日志变成可校验、可续采、可重放的数据包 | docker HDFS 集群 / 旧 132 例 / 大日志分片 | CasePack（manifest + logs.jsonl + metrics + labels） | 3d |
-| **P-B** 索引 | 把 5 类语料变成可混合检索的知识库 | 语料种子 + BGE ONNX 模型 | Milvus collection + 混合检索接口 + 引用锚点 | 4d |
+| **P-B** 索引 | 把 4 层语料变成可混合检索的知识库 | 语料种子 + BGE ONNX 模型 | Milvus collection + 混合检索接口 + 引用锚点 | 4d |
 | **P-C** 诊断 | 11 节点图：一句话/一段日志 → 带引用的报告 | CasePack + 知识库 + 6 个工具 + MCP | 报告 JSON + SSE 事件流 + runs 账本 | 11.5d |
 | **P-D** 回流 | 人审改判变成评测集与知识提案 | feedback 表 + 采纳记录 | golden 增量 + 索引版本 +1 + 周报 | 6d |
 | **P-E** 评测 | 把"我觉得好"变成可复现的数字 | golden 集 + 回放轨迹 | 7 个数字 + 6 份实验报告 | 横切 |
@@ -165,19 +165,19 @@
 
 **技术栈**：`docker` CLI（subprocess，不引 SDK）· asyncio 并发拉取 · pydantic v2 · iptables / tmpfs 做故障注入 · uv。
 
-**完成标志**：`make verify-collect` → **132/132 一致**；现场采出 3 例新案例（卷满 / 心跳 / 网络）；`make pack-lint` 全绿。**详细设计见 [P-A_COLLECT_PLAN.md](P-A_COLLECT_PLAN.md)。**
+**完成标志**：`make verify-collect` → **132/132 一致**；现场采出 24 例新案例（卷满 / 心跳 / 网络 / 安全模式 + 负样本 + DEBUG 对照）；`make pack-lint` 全绿。**详细设计见 [P-A_COLLECT_PLAN.md](P-A_COLLECT_PLAN.md)。**
 
 ### 4.2 P-B 索引与检索
 
-**做什么**：五段——语料构建（5 类）→ 4 种切分策略 → BGE 批量 embedding → Milvus 入库 → 混合检索（BM25 + dense + RRF + rerank），产出可被工具调用的检索接口与可回溯的引用锚点。
+**做什么**：五段——语料构建（4 层，见 P-B §3.1）→ 4 种切分策略 → BGE 批量 embedding → Milvus 入库 → 混合检索（BM25 + dense + RRF + rerank），产出可被工具调用的检索接口与可回溯的引用锚点。
 
-**输入**：语料种子（旧项目 154 chunk + 8 篇自写 runbook + 104 张根因卡 + 132 例案例报告 + 模板统计 + HDFS 文档）；`artifacts/releases/kb_v0.1/model/model.onnx`（BGE-small-zh，90MB）。
+**输入**：语料种子（旧项目 104 篇文档（154/416 chunk）+ 48 张生成卡 + 8 篇自写 runbook + 132 张工单 + 模板统计 + Apache 官方文档）；`artifacts/releases/kb_v0.1/model/model.onnx`（BGE-small-zh，90MB）。
 
 **产出**：Milvus collection `knowledge_chunks`（含 `source/kind/case_id/provenance/index_version` 等标量字段，支持按来源分区与过滤）；`rag/` 的检索接口；每条引用带 `(source, chunk_id, quote)`。
 
 **技术栈**：Milvus standalone（`milvusdb/milvus:v2.6.4`）+ `pymilvus 3.0.3` · HNSW(M=16, efC=200, COSINE) · 原生稀疏 BM25 · RRF(k=60) · rerank（ONNX bge-reranker 或 Qwen rerank API，二选一）· `onnxruntime` · `jieba` · `rank-bm25`。
 
-**完成标志**：2 万 chunk 入库；`recall@5 ≥ 0.80`；`make ask Q="..."` 能带出处回答；E1/E2/E3 三份对照实验成文。
+**完成标志**：~2000 chunk 入库（1500–2500）；`recall@5 ≥ 0.80`；`make ask Q="..."` 能带出处回答；E1/E2/E3 三份对照实验成文。
 
 ### 4.3 P-C 诊断
 
@@ -262,7 +262,7 @@ data/ models/ infra/ scripts/ docs/ openspec/
 
 | 层 | 选型 | 版本 | 备注 |
 |---|---|---|---|
-| 语言 / 包管理 | Python 3.12 + uv | uv 0.12.11 | PATH 上 python 是空壳，全程 `uv run` |
+| 语言 / 包管理 | Python 3.12 起（当前锁 3.14.7，`requires-python >=3.11`）+ uv | uv 0.12.11 | PATH 上 python 是空壳，全程 `uv run` |
 | Web | FastAPI + uvicorn | 最新稳定 | SSE 用原生 `StreamingResponse`，不引 `sse-starlette` |
 | 校验 / 配置 | pydantic v2 + pydantic-settings | 最新稳定 | 契约唯一源；`.env` 只读一次 |
 | LLM 客户端 | `langchain-openai`（`ChatOpenAI`） | **1.8.5** | **不装 `langchain` 元包** |
@@ -291,8 +291,8 @@ data/ models/ infra/ scripts/ docs/ openspec/
 | 段 | 天 | 一句话交付 | 主阶段 |
 |---|---|---|---|
 | **S0** 基座 | 2.5 | clone 即跑：uv + Makefile + CI + Milvus + 模型 + 契约生成 + 样例数据 | 基础 |
-| **S1** 采集 | 3 | CasePack 契约 + canonical/脱敏 + 两个 adapter + 132/132 迁移校验 + 现场采 3 例 | P-A |
-| **S2** 索引 | 4 | 5 类语料 → 2 万 chunk → Milvus → 混合检索 → RAG golden | P-B |
+| **S1** 采集 | 3 | CasePack 契约 + canonical/脱敏 + 两个 adapter + 132/132 迁移校验 + 现场采 24 例 | P-A |
+| **S2** 索引 | 4 | 4 层语料 → ~2000 chunk → Milvus → 混合检索 → RAG golden | P-B |
 | **S3** 诊断 | 6 | 6 工具 + ReAct baseline + 规划 + DAG 执行 + 11 节点图 + SSE/interrupt | P-C |
 | **S4** MCP | 2.5 | FastMCP server（5 工具 + 2 resource + 1 prompt）+ client + 同台路由 + E4 | P-C |
 | **S5** 入口 | 3.5 | 记忆两档 + 意图路由 + 日志自认领 case + Vue 五页 | P-C / P-D |
@@ -372,7 +372,7 @@ data/ models/ infra/ scripts/ docs/ openspec/
 | # | 决策点 | 结论 |
 |---|---|---|
 | D1 | LLM 与密钥 | ✅ **DeepSeek**，key 在 `.env` 的 `DEEPSEEK_API_KEY`；CI 用回放模式，不需要 key |
-| D2 | 语料规模 | ✅ **2 万 chunk**（Milvus 与 E1/E3 需统计意义） |
+| D2 | 语料规模 | ✅ **~2000 chunk**（2026-11-23 修订：2 万只能靠日志窗口切片，那类 chunk 的 `quote` 不含机制信息、会稀释 `citation precision`；代价是 E1/E3 置信区间变宽，理由见 P-B §3.5） |
 | D3 | 前端范围 | ✅ **五页**（Chat / Knowledge / Diagnose / Eval / MCP） |
 | D4 | 方案档位 | ✅ 全量（规划权 + 飞轮 + 成本路由 + 零表单）+ 采集重写 + S0 工程门禁 |
 | D5 | 采集源 | ✅ **docker 自建 1NN+3DN 现场采真实数据**，四类故障各 ≥2 例 |
@@ -385,9 +385,9 @@ data/ models/ infra/ scripts/ docs/ openspec/
 
 | 文档 | 角色 | 状态 |
 |---|---|---|
-| `IMPLEMENTATION_PLAN.md`（本文件） | **全景**：为什么做、做哪几块、怎么算完 | v1.0 |
-| `P-A_COLLECT_PLAN.md` | P-A 详细设计：采什么、什么环境、哪些等级、文件级清单 | v0.1 |
-| `P-B_RAG_PLAN.md` | P-B 详细设计：语料、切分、索引、混合检索、引用 | 待写 |
+| `IMPLEMENTATION_PLAN.md`（本文件） | **全景**：为什么做、做哪几块、怎么算完 | v1.1 |
+| `P-A_COLLECT_PLAN.md` | P-A 详细设计：采什么、什么环境、哪些等级、文件级清单 | v0.12 |
+| `P-B_RAG_PLAN.md` | P-B 详细设计：语料、切分、索引、混合检索、引用 | v0.2 |
 | `P-C_AGENT_PLAN.md` | P-C 详细设计：图、节点、工具契约、SSE、恢复 | 待写 |
 | `P-D_FLYWHEEL_PLAN.md` | P-D 详细设计：三回路、表结构、护栏 | 待写 |
 | `P-E_EVAL_PLAN.md` | P-E 详细设计：golden 造集、指标口径、实验 | 待写 |
@@ -403,8 +403,8 @@ data/ models/ infra/ scripts/ docs/ openspec/
 
 | # | 风险 | 概率 | 应对 |
 |---|---|---|---|
-| R1 | Milvus 镜像与 `pymilvus 3.0.3` 不匹配 | 低（镜像已在本机） | 起容器后先连一次；退 `milvus-lite`（**不支持 BM25 Function，E3 作废**），再退 Qdrant |
-| R2 | 2 万 chunk 用 CPU ONNX 太慢 | 高 | 先测 1k 吞吐；分批 + 缓存；必要时改 Qwen embedding API |
+| R1 | Milvus 镜像与 `pymilvus 3.0.3` 不匹配 | 中（本地一个 milvus/etcd/minio 镜像都没有，首次要拉 ~1.5 GB） | 起容器后先连一次；退 `milvus-lite`（**不支持 BM25 Function，E3 作废**），再退 Qdrant |
+| R2 | ~2000 chunk 用 CPU ONNX 太慢 | 低（规模已从 2 万降到 2 千） | 先测 1k 吞吐；分批 + 缓存；必要时改 Qwen embedding API |
 | R3 | 现场采集起不来 docker HDFS 集群 | 中→低（镜像 + 旧脚本可参照） | 退路：`file` adapter 采大日志分片 + `migrate` 132 例 |
 | R4 | 新采集器与旧数据对不齐 | 中 | 差异逐条列白名单，白名单外的必须修 |
 | R5 | plan 一旦偏，执行全跑偏 | 高 | 反证步骤 `falsifies` + replan 触发条件 + 保留 ReAct fallback |
@@ -422,4 +422,5 @@ data/ models/ infra/ scripts/ docs/ openspec/
 | v0.3 | 2026-11-21 | D1（DeepSeek）、D5（现场采集）拍板；补密钥铁律与现场条件核对 |
 | v0.4 | 2026-11-21 | 目录评审整改：补 `services/` 层与 L5；`CaseManifest`/`SourceAdapter` 单一来源；补 CI / LICENSE / 类型生成 / clone 可跑四项门禁 |
 | v0.5 | 2026-11-21 | 合理性审计整改：文档一致性 9 处；拆交付线/学习线两条口径；实验落点显性化；意图分类改规则兜底；心跳注入改 iptables |
+| **v1.1** | 2026-11-23 | **事实回填（不改任何边界）**：P-A 结项 + P-B 计划成稿后，把地图上印错的数字改对 —— ①语料规模 2 万 → **~2000 chunk**、5 类 → **4 层**（§1.2/§1.4/§4.2/§7 S2，并翻转 §11 的 D2 决策、记下理由）；②案例 3 例新采 → **24 例真采**（§1.4/§4.1/§7 S1）；③知识源核实：旧 KB 是 **104 篇文档 / 154-416 chunk**、`generated_cards.json` 是 **48 张生成卡**，两者不是一回事（原 §2 把"104 张根因卡"混为一谈，已按实测改写 §2 与 §4.2 输入）；④文档地图版本（P-A **v0.12**、P-B **v0.2**、本文件 v1.1）；⑤§13 R1 的"镜像已在本机"改为"本地无镜像、首次要拉 ~1.5 GB"，R2 风险从高降到低；⑥§6 的 Python 版本注明"3.12 起、当前锁 3.14.7" |
 | **v1.0** | 2026-11-22 | **角色变更：从"施工总图"改为"全景地图"。** 移出所有实现细节（字段定义、SSE 事件清单、状态机、逐日计划、文件级职责、Makefile、实验矩阵、故障注入表）到各阶段设计文档，本文只保留：概述、背景、五条流水线与各阶段的「做什么/输入/产出/技术栈/完成标志」、阶段间四条边、技术栈总览、里程碑总览、成功标准、目录形状、文档地图 |

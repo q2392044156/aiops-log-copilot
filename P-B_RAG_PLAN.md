@@ -1,6 +1,6 @@
 # P-B 索引与检索 · 实现计划
 
-> **版本**：v0.2（2026-11-23）—— O1（~2000 chunk）与 O5（`make ask` 归 P-B）已拍板；代码尚未开工，本文是施工图
+> **版本**：v0.3（2026-11-23）—— O1（~2000 chunk）与 O5（`make ask` 归 P-B）已拍板；代码尚未开工，本文是施工图
 > **上游文档**：`IMPLEMENTATION_PLAN.md` v1.0 的 §4.2（P-B 段落）/ §5（P-B → P-C 两条边）/ §7（S2 索引 4d）/ §8.1（`recall@5 ≥ 0.80`、`citation precision ≥ 0.95`）/ §8.3（E1/E2/E3）/ §9（十条工程约束）
 > **本文边界**：只讲 P-B —— 语料从哪来、怎么切、怎么算向量、怎么进 Milvus、怎么混合检索、怎么验收。
 > **不管**：诊断图与 LLM 编排（P-C）、知识提案审批与回流（P-D）、评测框架本身（P-E）、日志采集（P-A）。
@@ -52,9 +52,9 @@
 
 | 素材 | 位置 | 实测规模 | 状态 |
 |---|---|---|---|
-| 旧知识库 chunk | `…\artifacts\releases\kb_v0.1\index\chunks.jsonl` | **154 条**，字段全（`chunk_id/doc_id/section_path/root_cause_codes/evidence_unit_ids/risk_level/source_url/source_version`） | 可直接用 |
-| 结构化 chunk | `…\artifacts\retrieval\work\structured\chunks.jsonl` | **416 条**，同字段 | 疑似超集，需确认（V1 的 gate） |
-| 根因/知识卡 | `…\runtime\knowledge_expansion\generated_cards.json` | **48 张**（`doc_id/title/category/component/product/version/content_origin`） | 计划写"104 张"，**对不上** |
+| 旧知识库 chunk | `…\artifacts\releases\kb_v0.1\index\chunks.jsonl` | **154 条 / 104 篇文档**，字段全（`chunk_id/doc_id/section_path/root_cause_codes/evidence_unit_ids/risk_level/source_url/source_version`） | 可直接用 |
+| 结构化 chunk | `…\artifacts\retrieval\work\structured\chunks.jsonl` | **416 条 / 同样 104 篇文档**，同字段 | 疑似超集，需确认（V1 的 gate） |
+| 生成卡 | `…\runtime\knowledge_expansion\generated_cards.json` | **48 张**（`doc_id/title/category/component/product/version/content_origin`） | 与"104"不是一回事：104 是旧 KB 的 distinct `doc_id`（篇），48 是这里生成的卡；两者都要用 |
 | 案例工单 | `…\ops\lab\*\evidence\tickets\*.md` | 132/132 例都有 | 能不能当语料见 O6 |
 | 模板（Drain3 状态） | `…\artifacts\templates\{docker_container,wsl}\state.bin` | 10 KB / 8 KB，**二进制** | 需导出成可入库的模板清单 |
 | runbook | — | **0 篇** | 要自己写 8–12 篇 |
@@ -495,5 +495,6 @@ E3 若中文 BM25 跑不通（R6），写成"作废 + 原因"，不硬凑。
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.3 | 2026-11-23 | **更正一处误读**：总计划里的"104 张根因卡"其实是旧 KB 的 **104 篇文档**（154/416 chunk），而 `generated_cards.json` 是 **48 张生成卡**，两者不是同一物；§2.2 表与 §3.5 已按实测改写，总计划同步回填 |
 | v0.2 | 2026-11-23 | **O1 与 O5 拍板**：①chunk 总量定 **~2000**（六类语料的目标块数表），2 万方案否决并记下理由；②`make ask` 归 P-B，P-A 的目标改名 `make ask-case`（已落地）；③总计划 §4.2/§7 S2 的"2 万"由本文覆盖，不改总计划（遵其 §12 维护规则）；V3 判据改成 1500–2500 |
 | v0.1 | 2026-11-23 | 首版：语料三层（`case_card` / `mechanism` / `runbook` + `legacy_kb` / `template`）、4 种切分、BGE ONNX、Milvus `knowledge_chunks`、RRF+rerank、V1–V10 验收；据实测数据提出 O1（2 千 vs 2 万）、O5（`make ask` 命名冲突）、O7（不采 PDF） |
