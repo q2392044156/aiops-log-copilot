@@ -383,6 +383,11 @@ class ClusterStatus:
     live_datanodes: int
     stray_files: tuple[str, ...]
     network_members: tuple[str, ...]
+    #: 副本不足的块数。注入（尤其是 `dn_disk_broken`／`dn_volume`）会让 DN 暂时掉线，
+    #: 恢复后留下 Under-replicated 块；不补回来，下一例的基线就带着上一例的伤。
+    under_replicated_blocks: int = 0
+    #: 缺副本的块数（`dfsadmin -report` 里的 Missing blocks）。
+    missing_blocks: int = 0
 
     def check(self, *, expect_datanodes: int = 3) -> list[str]:
         problems: list[str] = []
@@ -398,7 +403,37 @@ class ClusterStatus:
         missing_net = [name for name in CONTAINERS.values() if name not in self.network_members]
         if missing_net:
             problems.append(f"网络 {VOLUME_NETWORK} 里缺容器：{missing_net}")
+        if self.under_replicated_blocks:
+            problems.append(
+                f"Under-replicated blocks = {self.under_replicated_blocks}"
+                "（上一例的伤还没补回来，基线会被污染；用 --repair 恢复）"
+            )
+        if self.missing_blocks:
+            problems.append(f"Missing blocks = {self.missing_blocks}（数据已经丢了，需要重采）")
         return problems
+
+
+def _count_from_report(report: str, prefix: str) -> int:
+    """从 `dfsadmin -report` 里取 `Prefix: N` 这种计数（取不到就当 0）。
+
+    两个坑都在真实输出里踩过：
+
+      - 这些行是**制表符缩进**的（`\\tUnder replicated blocks: 0`），
+        所以必须先 `strip()` 再比 —— 否则永远匹配不上、永远返回 0，
+        闸门看起来"通过"，其实压根没读到数；
+      - `Missing blocks` 后面还跟着 `Missing blocks (with replication factor 1)`，
+        前缀匹配会误命中它，所以要求 `prefix` 之后紧跟冒号。
+    """
+    for line in report.splitlines():
+        text = line.strip()
+        if not text.startswith(prefix):
+            continue
+        rest = text[len(prefix) :]
+        if not rest.startswith(":"):
+            continue  # `Missing blocks (with replication factor 1): 0` 不是同一个键
+        digits = "".join(ch if ch.isdigit() else " " for ch in rest).split()
+        return int(digits[0]) if digits else 0
+    return 0
 
 
 def check_cluster(
@@ -478,12 +513,37 @@ def check_cluster(
         live_datanodes=live,
         stray_files=tuple(stray),
         network_members=members,
+        under_replicated_blocks=_count_from_report(report, "Under replicated blocks"),
+        missing_blocks=_count_from_report(report, "Missing blocks"),
     )
 
 
 # ---------------------------------------------------------------------------
 # 小工具：给 CLI 用
 # ---------------------------------------------------------------------------
+
+
+def repair_cluster(*, containers: Mapping[str, str] | None = None) -> str:
+    """把注入留下的坏块从 HDFS 里清掉（`fsck -delete`），返回一行摘要。
+
+    为什么需要它：`dn_disk_broken` / `dn_volume` 这类注入会让 DN 掉线，
+    恢复后集群里留着 `Under-replicated` 甚至 `Missing` 的块。这些块不会自己消失
+    （副本数就这样定住了），下一例的基线就建在"上一例的伤"上面 ——
+    指标里的 `under_replicated_blocks` 会一直非 0，V7 也就永远只红不绿。
+
+    `fsck -delete` 只删**损坏/缺失**的块记录，健康块一个字节都不动；
+    代价是那些文件的数据真的没了 —— 对实验集群这是可接受的，
+    对生产集群这就是一次数据丢失，所以这个函数只在 `--repair` 时被调用。
+    """
+    names = containers if containers is not None else CONTAINERS
+    completed = subprocess.run(
+        ["docker", "exec", names["nn"], "hdfs", "fsck", "/", "-delete"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    tail = [line for line in completed.stdout.splitlines() if line.strip()][-3:]
+    return " / ".join(tail) if tail else completed.stdout.strip()
 
 
 def phase_window(manifest: CaseManifest, phase: Phase) -> tuple[str, str] | None:

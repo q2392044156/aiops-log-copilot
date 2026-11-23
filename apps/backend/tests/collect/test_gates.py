@@ -16,6 +16,7 @@ import pytest
 
 from logcopilot.collect.gates import (
     ClusterStatus,
+    _count_from_report,
     check_raw_parity,
     check_restored,
     compare_canonical,
@@ -283,6 +284,43 @@ def test_cluster_status_reports_every_deviation() -> None:
     assert any("Live datanodes = 2" in problem for problem in problems)
     assert any("残留" in problem for problem in problems)
     assert any("网络" in problem for problem in problems)
+
+
+def test_cluster_status_flags_unreplicated_blocks() -> None:
+    """上一例的伤没补回来时，闸门必须红 —— 否则基线建在别人的故障上。"""
+    status = ClusterStatus(
+        running=("alcp-nn", "alcp-dn1", "alcp-dn2", "alcp-dn3"),
+        safemode_off=True,
+        live_datanodes=3,
+        stray_files=(),
+        network_members=("alcp-nn", "alcp-dn1", "alcp-dn2", "alcp-dn3"),
+        under_replicated_blocks=4,
+        missing_blocks=1,
+    )
+
+    problems = status.check()
+
+    assert any("Under-replicated blocks = 4" in problem for problem in problems)
+    assert any("Missing blocks = 1" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    ("report", "prefix", "expected"),
+    [
+        # 真实输出是制表符缩进的；不 strip 就永远读不到数（闸门假绿）
+        ("Replicated Blocks:\n\tUnder replicated blocks: 7\n", "Under replicated blocks", 7),
+        # `Missing blocks (with replication factor 1)` 是另一个键，不能被前缀命中
+        (
+            "\tMissing blocks: 2\n\tMissing blocks (with replication factor 1): 0\n",
+            "Missing blocks",
+            2,
+        ),
+        ("\tMissing blocks (with replication factor 1): 5\n", "Missing blocks", 0),
+        ("什么都没有", "Under replicated blocks", 0),
+    ],
+)
+def test_count_from_report_reads_indented_keys(report: str, prefix: str, expected: int) -> None:
+    assert _count_from_report(report, prefix) == expected
 
 
 # ---------------------------------------------------------------------------

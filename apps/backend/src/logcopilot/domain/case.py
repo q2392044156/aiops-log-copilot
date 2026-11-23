@@ -51,6 +51,69 @@ PIPELINE_VERSION: Final[str] = "collect/0.2.0"
 #: 脱敏规则闭集，四条都由第 7 步的 `collect/redact.py` 实现。
 REDACT_RULES: Final[tuple[str, ...]] = ("host", "ip", "path", "token")
 
+
+# ---------------------------------------------------------------- 原文指针
+
+
+@dataclass(frozen=True, slots=True)
+class AnchorRef:
+    """一条"原文在哪"的指针（P-A §5：**不复制原文**）。
+
+    采到的原文留在 `runtime/hdfs-logs/<container>/` 下（bind mount 出来的），
+    pack 里只存 `(id, file, offset, length, sha256)`。这样 pack 能被人 clone 走，
+    体积也不随日志膨胀；要复核某行时按指针回去读，并用 sha256 证明没被改过。
+
+    `id` 是它指向的那条 `logs.jsonl` 记录（形如 `dn1:00042`）——没有这个字段，
+    指针就只是"某个文件里的一段字节"，下游（P-C 的 `get_event_evidence`）拿到
+    一条记录后无法反查它的原文。
+
+    为什么放在 `domain/` 而不是 `store/`：它是**跨阶段契约的一部分**
+    （P-A 产出、P-C 消费），`ports.py` 的 `CaseStore` 要返回它。
+    若留在 `store/`，`ports` 就得反过来 import `store`，分层立刻破。
+    `store/casepack.py` 仍然 re-export 这个名字，旧 import 不必改。
+    """
+
+    id: str
+    file: str
+    offset: int
+    length: int
+    sha256: str
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            raise ValueError("anchor.id 不能为空（它要指回 logs.jsonl 的某条记录）")
+        if not self.file:
+            raise ValueError("anchor.file 不能为空")
+        if self.offset < 0:
+            raise ValueError(f"anchor.offset 必须 >= 0，拿到 {self.offset}")
+        if self.length <= 0:
+            raise ValueError(f"anchor.length 必须 > 0，拿到 {self.length}")
+        if not self.sha256.startswith("sha256:") or len(self.sha256) != 71:
+            raise ValueError(f"anchor.sha256 格式不对: {self.sha256!r}")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "file": self.file,
+            "offset": self.offset,
+            "length": self.length,
+            "sha256": self.sha256,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> AnchorRef:
+        try:
+            return cls(
+                id=str(data["id"]),
+                file=str(data["file"]),
+                offset=int(data["offset"]),
+                length=int(data["length"]),
+                sha256=str(data["sha256"]),
+            )
+        except KeyError as exc:
+            raise ValueError(f"anchors 条目缺字段 {exc}") from None
+
+
 _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SHA1_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{40}$")
 #: case_id 会变成目录名，也会出现在 URL 里（P-C 的 `/case/<id>`）：
@@ -126,6 +189,21 @@ def _case_id(value: Any, where: str = "case_id") -> str:
             f"{where} 必须匹配 {_CASE_ID_RE.pattern}（小写字母开头、3-64 位），拿到 {value!r}"
         )
     return value
+
+
+#: `case_id` 的公开正则。任何"要把 case_id 拼进路径"的地方都该用它，
+#: 而不是自己再写一份 —— 两份正则迟早会不一致，而不一致的那一侧就是安全缺口。
+CASE_ID_PATTERN: Final[str] = _CASE_ID_RE.pattern
+
+
+def validate_case_id(value: Any, *, where: str = "case_id") -> str:
+    """校验 `case_id` 并原样返回；不合法就抛 `ValueError`。
+
+    `case_id` 同时是目录名（`data/cases/<case_id>/`）和 P-C 的 URL 片段
+    （`/case/<case_id>`），所以它必须是"纯路径安全 + 大小写无歧义"的：
+    `"../etc"` 这种值如果漏到 `Path(root) / case_id`，就会写到仓外去。
+    """
+    return _case_id(value, where)
 
 
 # ---------------------------------------------------------------- 闭集

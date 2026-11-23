@@ -10,10 +10,11 @@
 适配器不认识 `LogRecord`，也不认识 `CasePack` —— 这是 V4
 （file 与 docker 两条路径哈希相等）能成立的前提。
 
-实现列表（三者平级、可互换，这是 V4 的结构性保证）：
+实现列表（前三个平级、可互换，这是 V4 的结构性保证）：
     base.py    顺序 0a · 协议（StreamSpec / StreamReader / SourceAdapter / ComponentReader）
     file.py    顺序 0b · 读宿主机上的 bind mount 文件
     docker.py  顺序 0c · 读容器内的文件（docker exec stat / tail -c / ls）
+    wsl.py     顺序 0d · 骨架，构造即抛 NotImplementedError（P-A §6.1 的"留骨架"）
 """
 
 from logcopilot.collect.adapters.base import (
@@ -42,6 +43,7 @@ from logcopilot.collect.adapters.file import (
     FileStream,
     hdfs_streams,
 )
+from logcopilot.collect.adapters.wsl import WSL_REASON, WslAdapter
 
 __all__ = [
     "AmbiguousStream",
@@ -60,6 +62,8 @@ __all__ = [
     "StreamReader",
     "StreamSpec",
     "SubprocessRunner",
+    "WSL_REASON",
+    "WslAdapter",
     "container_streams",
     "decode_line",
     "hdfs_streams",

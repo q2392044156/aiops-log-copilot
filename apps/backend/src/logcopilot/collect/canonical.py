@@ -17,6 +17,12 @@
      没装 redactor 时产出会带真实 host/IP，只允许在测试和 dry-run 里用。
   3. **failed 行不丢弃**。一行都认不出来时仍产出 LogRecord，
      `raw` 留原文（P-A §6.2 第二步）。丢弃 = 静默少数据，比留下坏行更危险。
+  4. **客户端失败行要单独成条**（O12）。FsShell 的 stderr 是纯文本
+     （`put: Cannot create file ... Name node is in safe mode.`），没有时间戳，
+     先前的实现把它当续行并进上一条记录的 `raw` —— 于是客户端侧故障在 level
+     分布里结构性不可见，`NN_SAFE_MODE` 这一族就是这么被"造不出证据"的。
+     现在它单独成条、级别 WARN、时间戳继承上一行（`parse_status=partial`）。
+     只对 `hdfs_log4j` 生效，`lab` 保持原样（理由见 `_client_failure` 的注释）。
 """
 
 from __future__ import annotations
@@ -115,6 +121,35 @@ _REST: Final[re.Pattern[str]] = re.compile(
 
 #: 级别别名。Hadoop 各版本混用 `WARN` / `WARNING`，都收进闭集。
 _LEVEL_ALIASES: Final[dict[str, str]] = {"WARNING": "WARN", "ERR": "ERROR"}
+
+#: FsShell 的命令名闭集（用于识别客户端失败行，见 `_CLIENT_FAILURE`）。
+#: 只收"真会出现在 stderr 里的命令"，不是把 `hdfs` 的 200 个子命令抄一遍：
+#: 漏一个的代价是那行退回续行（旧的错误行为），多一个假名的代价是把一行
+#: 普通正文错认成失败 —— 后者更贵，所以闭集宁窄勿宽。
+_FS_SHELL_COMMANDS: Final[frozenset[str]] = frozenset(
+    {
+        "appendToFile", "cat", "checksum", "chgrp", "chmod", "chown", "copyFromLocal",
+        "copyToLocal", "count", "cp", "createSnapshot", "deleteSnapshot", "dfs", "du",
+        "dus", "expunge", "find", "fsck", "get", "getfacl", "getmerge", "hdfs", "head",
+        "help", "ls", "mkdir", "moveFromLocal", "moveToLocal", "mv", "put", "renameSnapshot",
+        "rm", "rmdir", "setfacl", "setrep", "stat", "tail", "test", "touchz",
+    }
+)  # fmt: skip
+
+#: 客户端失败行（O12）。形如：
+#:
+#:   `put: Cannot create file/workload/w_1.txt._COPYING_. Name node is in safe mode.`
+#:   `cat: '/workload/w_1.txt': No such file or directory`
+#:
+#: 它们是 FsShell 往 stderr 打的**纯文本**，没有时间戳、没有级别、没有 logger。
+#: 修复前这类行被当成"续行"并进上一条 log4j 记录的 `raw`，于是：
+#:   ① 失败既不算一条记录、也不进 `by_level` —— 客户端侧故障在 level 上结构性不可见；
+#:   ② 每例留下 200–400 条 `parse_failed`（严格说它们不算"解析失败"，是没被认领）。
+#: 现在单独成条：级别 WARN（它确实是客户端侧的失败），时间戳继承上一行
+#: （这一行本身没有时间），`parse_status=partial` 明示"时间戳是继承来的"。
+_CLIENT_FAILURE: Final[re.Pattern[str]] = re.compile(
+    r"^(?P<command>[A-Za-z][A-Za-z0-9]*):\s+(?P<message>\S.*)$"
+)
 
 
 class Redactor(Protocol):
@@ -233,6 +268,28 @@ def _parse_head(body: str) -> _Head | None:
     return _Head(ts=ts, level=level, logger=logger, message=message, complete=complete)
 
 
+def _client_failure(body: str, *, profile: CanonicalProfile) -> tuple[str, str] | None:
+    """认一条 FsShell 客户端失败行；认不出返回 `None`。
+
+    **只对 `hdfs_log4j` 生效**，理由有二：
+
+      1. `lab` 档位跑的是 132 个已迁移、已冻结的 pack —— 给它们多造记录会改
+         `canonical_sha256`，V2 的 `tests/fixtures/verify/baseline.json` 全部作废，
+         而迁移是为了"证明解析器吃得下真实形态"，不是为了让旧数据更好看。
+      2. 旧实验台的客户端日志本来就没被采集（只采了服务端四个文件），
+         所以 `lab` 里根本不存在这类行 —— 开个用不上的分支只会留下没被测过的代码。
+    """
+    if profile is not CanonicalProfile.HDFS_LOG4J:
+        return None
+    match = _CLIENT_FAILURE.match(body)
+    if match is None:
+        return None
+    command = match.group("command")
+    if command not in _FS_SHELL_COMMANDS:
+        return None
+    return command, body.strip()
+
+
 # ---------------------------------------------------------------- 主流程
 
 
@@ -328,6 +385,27 @@ def canonicalize(
         head = _parse_head(body)
 
         if head is None:
+            failure = _client_failure(body, profile=profile)
+            if failure is not None:
+                # ---- 客户端失败行（O12）：单独成条、级别 WARN
+                # 时间戳继承上一行：这一行自己没时间。`partial` 就是在说这件事，
+                # 别把它当 ok —— P-C 若按 ts 排序，要知道这一条的 ts 是近似的。
+                _command, message = failure
+                groups.append(
+                    _Group(
+                        line_no=line_no,
+                        component=comp,
+                        ts=prev_ts,
+                        level=LogLevel.WARN,
+                        logger="FsShell",
+                        message=message,
+                        status=ParseStatus.PARTIAL,
+                        raw_lines=[line],
+                    )
+                )
+                prev_component = comp
+                continue
+
             # ---- 续行：追加到上一组
             if groups:
                 groups[-1].add_continuation(body, line)

@@ -423,3 +423,89 @@ def test_blank_line_does_not_break_the_group_above() -> None:
         ("dn1:00003", "INFO"),
     ]
     assert result.raw_line_count == 3
+
+
+# ---------------------------------------------------------------- 客户端失败行（O12）
+
+_SAFEMODE_FSSHELL_LINE = (
+    "put: Cannot create file/workload/w_1.txt._COPYING_. Name node is in safe mode."
+)
+
+
+def test_client_failure_line_becomes_a_warn_record() -> None:
+    """FsShell 的纯文本失败行要单独成条、级别 WARN（O12）。
+
+    修复前它被当成续行并进上一条 log4j 记录的 `raw`：
+      - 失败既不算记录也不进 `by_level` → 客户端侧故障在 level 上不可见；
+      - `NN_SAFE_MODE` 四族里唯一没有 level 证据，就是被这条吞掉的。
+    """
+    result = run_lines(
+        [
+            "2026-11-22 10:03:11,482 INFO DataNode:1201 - x",
+            _SAFEMODE_FSSHELL_LINE,
+        ],
+        profile=CanonicalProfile.HDFS_LOG4J,
+        since=SINCE_HDFS,
+    )
+
+    assert len(result.records) == 2
+    normal, failure = result.records
+    assert failure.id == "dn1:00002"
+    assert failure.level is LogLevel.WARN
+    assert failure.logger == "FsShell"
+    assert failure.message == _SAFEMODE_FSSHELL_LINE
+    # 这一行自己没有时间戳：继承上一行，并用 partial 明示"时间是继承来的"。
+    assert failure.ts == normal.ts
+    assert failure.parse_status is ParseStatus.PARTIAL
+    assert failure.raw == _SAFEMODE_FSSHELL_LINE
+    # 关键：它没有被上一条吞进 raw。
+    assert normal.raw is None
+
+
+def test_client_failure_rule_does_not_apply_to_the_lab_profile() -> None:
+    """`lab` 档位必须保持原样 —— 132 个迁移 pack 的哈希已冻结在 V2 基准里。"""
+    result = run_lines(
+        [
+            "[aiops-lab-dn1] 2026-11-11 08:15:05 INFO  DataNode:750 - x",
+            "[aiops-lab-dn1] " + _SAFEMODE_FSSHELL_LINE,
+        ],
+        profile=CanonicalProfile.LAB,
+        since=SINCE_LAB,
+    )
+
+    assert len(result.records) == 1
+    record = result.records[0]
+    assert record.parse_status is ParseStatus.PARTIAL
+    assert record.raw is not None
+    assert _SAFEMODE_FSSHELL_LINE in record.raw
+
+
+def test_unknown_command_prefix_is_still_a_continuation() -> None:
+    """闭集之外的前缀不许被误认成失败行（宁可退回续行，也不许乱造 WARN）。"""
+    result = run_lines(
+        [
+            "2026-11-22 10:03:11,482 INFO DataNode:1201 - x",
+            "foobar: this is prose, not a command",
+        ],
+        profile=CanonicalProfile.HDFS_LOG4J,
+        since=SINCE_HDFS,
+    )
+
+    assert len(result.records) == 1
+    assert result.records[0].level is LogLevel.INFO
+    assert result.records[0].raw is not None
+    assert "foobar: this is prose" in result.records[0].raw
+
+
+def test_client_failure_as_the_first_line_uses_since() -> None:
+    """文件第一行就是客户端失败行时，时间戳兜底用 `since`，不抛异常。"""
+    result = run_lines(
+        [_SAFEMODE_FSSHELL_LINE],
+        profile=CanonicalProfile.HDFS_LOG4J,
+        since=SINCE_HDFS,
+    )
+
+    assert len(result.records) == 1
+    assert result.records[0].ts == SINCE_HDFS
+    assert result.records[0].level is LogLevel.WARN
+    assert result.records[0].raw == _SAFEMODE_FSSHELL_LINE

@@ -38,6 +38,7 @@ from logcopilot.collect.gates import (  # noqa: E402 - 上面的 sys.path 必须
     check_raw_parity,
     check_restored,
     compare_packs,
+    repair_cluster,
 )
 from logcopilot.store.casepack import pack_paths  # noqa: E402
 
@@ -82,7 +83,7 @@ def run_v4(mount_root: Path, tail_bytes: int) -> int:
     return 0
 
 
-def run_v7(root: Path, live: bool) -> int:
+def run_v7(root: Path, live: bool, repair: bool = False) -> int:
     _print_header("V7 · 注入可逆")
     problems = check_restored(root)
     for problem in problems:
@@ -96,6 +97,14 @@ def run_v7(root: Path, live: bool) -> int:
 
     status = check_cluster()
     live_problems = status.check()
+    if repair and (status.under_replicated_blocks or status.missing_blocks):
+        print(
+            f"[V7] 先修坏块：Under-replicated={status.under_replicated_blocks}、"
+            f"Missing={status.missing_blocks} → 跑 fsck -delete"
+        )
+        print(f"[V7] fsck：{repair_cluster()}")
+        status = check_cluster()
+        live_problems = status.check()
     for problem in live_problems:
         print(f"[V7] FAIL {problem}")
     if problems or live_problems:
@@ -103,7 +112,7 @@ def run_v7(root: Path, live: bool) -> int:
     print(
         "[V7] PASS 现场已复原：容器 "
         f"{len(status.running)} 个在跑、安全模式 OFF、"
-        f"Live DN={status.live_datanodes}、无注入残留"
+        f"Live DN={status.live_datanodes}、无注入残留、副本齐全"
     )
     return 0
 
@@ -117,7 +126,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--v4", action="store_true", help="file 与 docker 两条取数路径逐字节比")
     parser.add_argument("--v7", action="store_true", help="故障注入是否可逆（离线 + 可选现场）")
     parser.add_argument(
-        "--live", action="store_true", help="V7 附加现场体检（容器 / 安全模式 / DN）"
+        "--live", action="store_true", help="V7 附加现场体检（容器 / 安全模式 / DN / 坏块）"
+    )
+    parser.add_argument(
+        "--repair",
+        action="store_true",
+        help="V7 现场体检发现坏块时先跑 fsck -delete（会真的删掉那些文件，仅限实验集群）",
     )
     parser.add_argument(
         "--mount-root",
@@ -140,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.v4:
         codes.append(run_v4(Path(args.mount_root), args.tail_bytes))
     if args.v7 or not codes:
-        codes.append(run_v7(Path(args.root), args.live))
+        codes.append(run_v7(Path(args.root), args.live, args.repair))
 
     worst = max(codes) if codes else 0
     print(f"\n[verify-gates] {'全部通过' if worst == 0 else '有失败项'}")

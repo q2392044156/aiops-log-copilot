@@ -17,7 +17,7 @@ PY      := $(UV) run --project $(BACKEND) python
 ARGS    ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint fmt type test pack-lint verify-collect verify-gates collect annotate annotate-check ask
+.PHONY: help install lint fmt type test pack-lint verify-collect verify-gates collect annotate annotate-check ask check check-live
 
 help:
 	@echo 用法: make 目标   [ARGS=附加参数]
@@ -25,7 +25,9 @@ help:
 	@echo   lint            ruff 静态检查 + 格式检查（只查不改）
 	@echo   fmt             ruff 格式化 + 自动修可修的 lint 问题（会改文件）
 	@echo   type            pyright 类型检查（首次运行要下一份 node，较慢）
-	@echo   test            pytest（当前 457 条契约测试）
+	@echo   test            pytest（当前 461 条契约测试）
+	@echo   check           离线全套：lint + test + pack-lint + verify-collect（一条命令看红绿）
+	@echo   check-live      离线全套 + V4 逐字节对拍 + V7 现场复原（要集群在跑）
 	@echo   pack-lint       校验 CasePack：make pack-lint CASE=inc_dnvol_01 CHECK=levels
 	@echo   verify-collect  132/132 一致性核验（第 11 步才有脚本）
 	@echo   verify-gates    收口闸门 V3/V4/V7：make verify-gates ARGS="--v4"
@@ -113,3 +115,22 @@ annotate:
 annotate-check:
 	$(PY) scripts/annotate_case.py --case $(CASE) $(ARGS)
 	$(PY) scripts/pack_lint.py --case $(CASE) --check levels
+
+# ---------------------------------------------------------------------------
+# check / check-live：一条命令看红绿
+#
+# 结项时要回答"P-A 现在到底绿不绿"，答案不该是"我记得刚跑过 6 条命令"。
+# `check` 只跑离线部分（不碰集群、不碰 docker），CI 与任何人都能跑；
+# `check-live` 再加 V4（两条取数路径逐字节对拍）与 V7（注入后是否复原），
+# 这两条必须集群在跑，所以单独一个目标，绝不混进默认路径。
+#
+# 注意 `check` 不带 ARGS 透传：它是闸门，不是给人传 -k 过滤器的地方。
+# 想只跑一部分就直接用对应的单个目标。
+# ---------------------------------------------------------------------------
+check: lint test pack-lint verify-collect
+	@echo [check] 离线闸门全部通过：lint / test / pack-lint / verify-collect
+
+check-live: check
+	$(PY) scripts/verify_gates.py --v4
+	$(PY) scripts/verify_gates.py --v7 --live
+	@echo [check-live] 现场闸门也通过：V4 逐字节一致 / V7 复原干净
