@@ -1,11 +1,24 @@
 # P-A 采集流水线 · 实现计划
 
-> **版本**：v0.3（2026-11-22）
+> **版本**：v0.6（2026-11-23）—— **结项版**：P-A 的代码线已全部落地，本文此后只做"事实回填"
 > **上游文档**：`IMPLEMENTATION_PLAN.md` v1.0 的 §4.1（P-A 段落）/ §5（CasePack 契约与目录形状）/ §7（S1 里程碑）/ §8.2（红线）
 > **本文边界**：只讲 **P-A（采集）** 这一段——采什么日志、用什么环境采、采哪些等级与窗口、A1/A2/A3 各做什么、怎么验收。
 > **不管**：窗口切分 / 模板 / 门禁 / 事件合并（那是旧项目已有的检测侧，新项目不复现）、检索与诊断（P-B / P-C）。
 > **与总计划的关系**：v0.1 的"本文会修订总计划一处（指纹拆分）"**已闭环**——总计划 v1.0 §4.1 已直接写成 `input_fingerprint` + `canonical_sha256` 两个哈希。本文只保留定义与不变式，不再有"待回填"项。
 > **代码落点**：下文相对路径都相对 `apps/backend/src/logcopilot/`（总计划 v1.0 §5 目录形状）；`scripts/`、`data/`、`infra/` 相对仓库根。
+
+## 0. 结项状态（v0.6）
+
+> 这一节是 v0.6 唯一新增的"结论先行"块：先说清 P-A **做到了什么、没做到什么**，后面各节的规则才不会被当成"待办"来读。
+
+| 维度 | 现状（2026-11-23 实测） |
+|---|---|
+| 代码 | 源码 + 脚本约 **8900 行**，17 个测试文件、**457 条用例**全绿；`ruff` / `pyright` 0 问题 |
+| 产物 | `data/cases/` 下 **138 个完整 pack**：**132 例迁移**（`origin=migrated`，旧实验台）+ **6 例真采**（`origin=collected`，本仓库集群） |
+| 闸门 | `pack-lint` 138/138、`verify-collect` 132/132（6 例新采不参与比对）、`verify-gates` V3/V4/V7 全通过 |
+| 环境 | `infra/hdfs/` 一套 1NN+3DN 即代码；`make collect` 一条命令出 pack，20 分钟一例（2+5+2 或 5+10+5） |
+| 未做 | ①样本矩阵只到 6 例（22 例计划见 §3.4）；②`NN_SAFE_MODE` 无判别证据（O10）；③`ports.py` 的 `CaseStore` 尚未落地（P-A 自己用不到）；④`anchors` 只有新采例有指针，迁移例没有 |
+| 复现 | `make install && make test`（457 条）→ `make verify-collect`（132/132）→ `make pack-lint`（138/138）→ `make verify-gates ARGS="--v7 --live"`（要集群在跑） |
 
 ---
 
@@ -145,18 +158,27 @@ T-5min ────────── T0 ─────────────
 
 > 关于心跳：HDFS 默认 `heartbeat.interval=3s`、`recheck.interval=5min` → 判 dead 约需 `2*300+10*3=630s ≈ 10.5min`。**`DN_HEARTBEAT` 若只采 10 分钟，很可能采不到 dead 判定**。两个办法：①该例窗口拉到 15 min；②在 `conf/hdfs-site.xml` 把 `heartbeat.recheck.interval` 调到 `60s` 加速（**推荐 ②，并在 manifest 记 `config_overrides`**，否则面试时会被问"你是不是改了参数才造出故障"）。这一条是本计划里最容易踩的坑。
 
-### 3.4 采集矩阵：S1 只采 3 例，S6 前补齐 12 例
+### 3.4 采集矩阵：22 例的计划，已采 6 例（v0.6 回填）
 
-| ID | 故障 | 注入脚本 | 窗口 | S1 内采？ |
-|---|---|---|---|---|
-| `inc_dnvol_01` | 卷满 | `inject/dn_volume_full.sh`（dn1） | 20 min | ✅ |
-| `inc_hb_01` | 心跳 | `inject/dn_heartbeat_drop.sh`（dn2，iptables DROP 8020） | 15 min | ✅ |
-| `inc_net_01` | 网络 | `inject/net_partition.sh`（dn3，DROP 50010） | 20 min | ✅ |
-| `inc_sf_01` | 安全模式 | `inject/nn_safemode.sh` | 20 min | ⬜ S2 后 |
-| `inc_dnvol_02` / `inc_hb_02` / `inc_net_02` / `inc_sf_02` | 重复例 | 同上 | 同 | ⬜ S6 前 |
-| `base_healthy_01..04` | **正常基线** | 无注入，只跑读写 | 20 min | 其中 1 例 ✅ |
+> v0.1 写的是 12 例，v0.6 按实测改成 22 例矩阵 —— 加列的每一例都对应"某个变体在日志里的表现不一样"，不是凑数。`NN_SAFE_MODE` 已采一例发现无判别证据（O10），它的其余变体要么换成"块缺失型"，要么放弃。
 
-**为什么 S1 只采 3 例**：S1 的目标是"管线通 + 端到端跑通一次"，不是"数据集齐"。采满 12 例 ≈ 4 小时纯采集 + 4 次环境重置，会把 S1 的 3 天吃掉半天。**先 3 例打通，剩下的按需补**——这也让"续采"能力有真实用武之地（同一 case 分两次采）。
+| 族 | ID | 注入变体（`collect/inject.py` 的键） | 状态 |
+|---|---|---|---|
+| 正常 | `base_healthy_01/02/03` | 无注入 + 读写负载（空载集群不写日志，healthy 例必须有负载） | ✅ 2/3 |
+| 正常 | `base_noise_01/02` | 良性扰动（滚动重启 DN；负载尖峰） | ⬜ 未采（负样本，P-E 算"不报即对"） |
+| 卷 | `inc_dnvol_01` | `dn_volume`：把 dn1 的 2g tmpfs 写满 4g | ✅ 已采（证据全在 WARN） |
+| 卷 | `inc_dnvol_02` | `dn_disk_broken`：把 dn2 卷里的 `current` 换成普通文件后重启 | ✅ 已采（`ERROR=1`：`Initialization failed for Block pool`） |
+| 卷 | `inc_dnvol_03/04/05` | 只读挂载 / 删卷目录 / dn1+dn3 同时满 | ⬜ 未采 |
+| 心跳 | `inc_hb_01` | `dn_heartbeat_pause`（pause dn2） | ✅ 已采（dead≈30s，`ERROR=3` 来自 WRITE_BLOCK 超时） |
+| 心跳 | `inc_hb_02/03` | `dn_heartbeat_stop`（stop dn2）/ `dn_heartbeat_pause`（pause dn1） | ⬜ 未采 |
+| 心跳 | `inc_hb_04/05` | 网络丢包致心跳丢失 / 停两台留一台（逼近副本不足） | ⬜ 未采 |
+| 安全模式 | `inc_safemode_01` | `nn_safemode`（`dfsadmin -safemode enter`） | ⚠️ 已采但**无判别证据**，移到 `runtime/no-evidence/`（O10） |
+| 安全模式 | `inc_safemode_02/03/04` | 块缺失型（停 DN 到 `threshold.pct` 以下）/ edits 满 / 只读 edits | ⬜ 未采（要新注入变体） |
+| 网络 | `inc_net_01` | `network`（disconnect dn3 ↔ nn 网络） | ⬜ 未采（第 16 步验证过：客户端打 9 条 WARN，可采） |
+| 网络 | `inc_net_02` | `net_disconnect`（dn3 出网）+ 负载 | ✅ 已采（服务端 3 条 `DataXceiver error`、客户端 WARN 进 pack） |
+| 网络 | `inc_net_03/04/05` | 断 client↔dn / 断 dn↔dn / 高延迟 | ⬜ 未采 |
+
+**为什么当初只采 3 例**：S1 的目标是"管线通 + 端到端跑通一次"，不是"数据集齐"。采满 22 例 ≈ 9 小时纯采集 + 22 次环境重置，会把 S1 的 3 天吃掉一天半。**先打通，再按矩阵补**——这也让"续采"能力有真实用武之地（同一 case 分两次采）。
 
 ### 3.5 正常基线为什么必须单独采
 
@@ -355,10 +377,12 @@ data/cases/<case_id>/
 | V3 | 续采不重不漏 | `make verify-gates ARGS="--v3 A B"` | 两侧**各自**没有重复 `id`；记录内容的多重集合相同（`(ts, level, component, logger, message, raw, parse_status)` 逐条对账）；`counters` 相同。**不比 `id` 序列与 `canonical_sha256`**（见下方 O11） |
 | V4 | 两条读路径一致 | 同窗口分别用 `file` 与 `docker --path` 采 | `canonical_sha256` 相等（canonical 投影已排除 `source`，见 §6.3） |
 | V5 | 正常例零 ERROR | `make pack-lint CASE=base_healthy_01 CHECK=levels` | `by_level.ERROR == 0` |
-| V6 | 故障例有证据（**只对 `origin=collected` 的新采例成立**） | `make pack-lint CASE=inc_dnvol_01 CHECK=levels`（3 个 `inc_*` 各跑一次） | `min_error_lines + min_warn_lines >= 1`；实测 `ERROR`/`WARN` 各自不低于门槛；`expect.error_components` 非空且其中每个组件都真的出现过**非 INFO**（WARN 或 ERROR）记录。**不做反向断言**：expect 之外的组件跟着报错不算失败 |
+| V6 | 故障例有证据（**只对 `origin=collected` 的新采例成立**） | `make pack-lint CASE=inc_dnvol_02 CHECK=levels`（4 个 `inc_*` 各跑一次） | `min_error_lines + min_warn_lines >= 1`；实测 `ERROR`/`WARN` 各自不低于门槛；`expect.error_components` 非空且其中每个组件都真的出现过**非 INFO**（WARN 或 ERROR）记录。**不做反向断言**：expect 之外的组件跟着报错不算失败 |
 | V7 | 可逆 | 每个 inject 脚本执行 `_restore.sh` 后跑 | `dfsadmin -report` 的 Live DN 数回到 3；`safemode get` 回 OFF |
 | V8 | 脱敏有账 | 任意样例 | `counters.redacted` 四类字段齐全，`ip`/`path` 两类 > 0 且与 `grep` 抽查一致；旧数据命中已有占位符时为 0 且**不算失败** |
 | V9 | 旧两种语法都能解析 | `pytest tests/collect/ -k lab` | 语法 A / 语法 B / 带前缀续行 三类 fixture 全部 `ok` 或 `partial`，`failed == 0` |
+| V10 | 产物可被人查询（v0.6 新增） | `make ask CASE=inc_dnvol_02 ARGS="--level ERROR"` | 命中行按 `anchors` 回读出**原始字节**；指针不可用时必须打印原因（文件没了 / 偏移越界 / sha256 对不上），不许静默当成"没有原文"；`--json` 的字段集合稳定 |
+
 
 > **V2 的基准从哪来（v0.1 漏了）**：旧 132 例的 `evidence/logs/*.log` 实测只有 2–993 行，而 `data/processed/*/logs.parquet` 是旧项目的全量语料、**不是这 132 例的切片**。所以"全等"不能拿新解析器自己当参照。现在的做法是两层：①`store/verify.py` 用**独立第二实现**只读 `logs.jsonl` 文本重算（不 import `domain.log`、不调 `casepack` 的计算函数），与生产者只共享契约；②把通过时的指纹冻结进 `tests/fixtures/verify/baseline.json`，此后任何一例的任何数字变化都算失败，必须显式 `--update-baseline` 并让基准 diff 出现在提交里。V9 是 V2 的前置检查。
 >
@@ -373,6 +397,23 @@ data/cases/<case_id>/
 >
 > 2026-11-23 做 V3 闸门时用真实集群打出来的：两侧各 194 条、id 集合与 counters 全等、内容多重集合全等，但 39 条的 id 落了不同的行，`canonical_sha256` 不同。**处置**：V3 只断言"不重不漏 + 内容一致"（`compare_packs`），不比 id 序列与哈希。要把这两个也稳定下来，得让 `id` 由「流名 + 流内偏移」派生而不是全局自增 —— 那是 id 格式的 schema 变更，132 个已迁移 pack 都要重迁，并同步改 `tests/fixtures/verify/baseline.json`。真要做时单开一步。
 
+
+---
+
+### 7.1 当前实况（v0.6 回填，2026-11-23 真跑）
+
+| 验收项 | 命令 | 最近一次结果 |
+|---|---|---|
+| V1 | `make pack-lint` | **138 个 pack，0 个有问题** |
+| V2 | `make verify-collect` | **132/132 一致**（6 例新采不参与比对：时间戳每次采集都变，冻进基准等于把"重采一次"变成回归失败） |
+| V3 | `make verify-gates ARGS="--v3 A B"` | 通过（同一批起点、一次采完 vs 中断后 attach，内容多重集合与 counters 全等） |
+| V4 | `make verify-gates ARGS="--v4"` | 通过：nn/dn1/dn2/dn3 四条主流**逐字节相同**（各 64 KiB 区间比对） |
+| V5 | `make pack-lint CASE=base_healthy_01 CHECK=levels` | 通过（`ERROR == 0`） |
+| V6 | `make pack-lint CASE=inc_dnvol_02 CHECK=levels` | 通过（`ERROR=1` 来自 DN 启动失败；`inc_dnvol_01` 走 WARN 证据） |
+| V7 | `make verify-gates ARGS="--v7 --live"` | 通过（容器 4 个在跑、安全模式 OFF、Live DN=3、无 `lab.fill` 残留） |
+| V8 | 同上（`counters.redacted`） | 通过（新采例 `ip`/`path` 两类 > 0；迁移例命中已有占位符为 0，不算失败） |
+| V9 | `pytest -k lab` | 通过（语法 A / B / 带前缀续行） |
+| V10 | `make ask ...` | 通过（`base_healthy_02` 的 71 条指针逐条回读自洽；三种悬空原因都能打印） |
 
 ---
 
@@ -416,6 +457,38 @@ data/cases/<case_id>/
 
 **代码量预估**：`domain/` ≈ 180 行，`collect/` ≈ 700 行，`store/` ≈ 150 行，`scripts/` ≈ 200 行，测试 ≈ 500 行，`infra/hdfs/` ≈ 150 行。合计约 1900 行（比 v0.1 的 1600 多：canonical 要两个 profile、pack 要 `finalize` 与投影哈希）——**3 天交付线是紧的，学习线 5–6 天更实际**。
 
+### 8.3 实际交付（v0.6 回填）
+
+> 上表的估算是 1900 行，实际约 **8900 行源码 + 6600 行测试**。差 4 倍不是"写多了"，而是估算时只数了"主流程"，没数 docstring（每个文件开头都写"为什么这么做"）、错误分支与 CLI。如实记在这里，方便下个阶段估工时。
+
+| 文件 | 行数 | 落地情况 |
+|---|---:|---|
+| `domain/log.py` | 285 | ✅ `LogRecord` 十字段 + 6 类校验 + `canonical_payload` |
+| `domain/case.py` | 993 | ✅ manifest / labels 全套（枚举 6 个、类 13 个） |
+| `store/casepack.py` | 705 | ✅ 读写 + `finalize` + `audit` / `audit_levels` + 两个哈希 + anchors + `checkpoint.json` sidecar |
+| `store/verify.py` | 356 | ✅ V2 的独立第二实现 + 冻结基准（**v0.1 没规划**：原计划把核验塞在 `scripts/` 里，实测发现"逻辑要在库里才能被测试直接调"） |
+| `store/query.py` | 429 | ✅ `make ask` 的检索与报告（**v0.1 没规划**，只写了 `scripts/ask.py`） |
+| `collect/canonical.py` | 434 | ✅ 两个 profile + 剥前缀 + 续行归并 |
+| `collect/redact.py` | 251 | ✅ 四类规则 + 哨兵幂等 + 计数 |
+| `collect/adapters/base.py` | 399 | ✅ 协议 + `ComponentReader`（统一发号 + mid-stream checkpoint） |
+| `collect/adapters/file.py` | 357 | ✅ glob 布局 + 半行不消费 + 三查续采 + spans |
+| `collect/adapters/docker.py` | 408 | ✅ 远端文件系统四命令 + 与 file 逐字节对齐 |
+| `collect/collect.py` | 871 | ✅ 三模式 + 跟随 + 指标 + 注入调度 + 窗口硬边界 + `resume_from` |
+| `collect/metrics.py` | 421 | ✅ `docker stats` / `dfsadmin -report` / `safemode` / `df` 四类采样（**v0.1 没规划**） |
+| `collect/inject.py` | 463 | ✅ 六种注入变体的编排（**v0.1 只写了"注入脚本"**；脚本本身在 `infra/hdfs/inject/`，因为要挂进容器） |
+| `collect/labels.py` | 205 | ✅ `measure` / `annotate` / `describe`（机器写 `fault_injection`，人写其余） |
+| `collect/gates.py` | 504 | ✅ V3 / V4 / V7 三条闸门（**v0.1 只在 §7 写了验收标准，没有实现位置**） |
+| `collect/migrate.py` | 587 | ✅ 132 例迁移（registry + 时区平移 + `content_sha256` 校验） |
+| `scripts/`（9 个） | 1311 | ✅ `pack_lint` / `verify_collect` / `verify_gates` / `collect_case` / `annotate_case` / `ask` / `migrate_cases` / `snapshot_metrics` |
+| `infra/hdfs/`（20 个文件） | — | ✅ compose + 4 份 conf（含客户端 `client-log4j.properties`）+ 3 个 bin（含 `workload.sh`）+ 10 个 inject 脚本 |
+| 测试（17 个文件） | 6589 | ✅ 457 条用例；仓库根 `tests/fixtures/verify/baseline.json`（2083 行）是 V2 的冻结基准 |
+
+**与 §8.2 清单的三处偏差（都是有意的，记在这里免得下个人以为是漏项）**：
+
+1. **`ports.py` 至今没有落地**。计划里写"P-A 只往 `ports.py` 加一个 `CaseStore`"，但 P-A 自己一次也没用到它——`store/casepack.py` 是具体实现，P-C 才需要 Protocol。**结论**：等 P-B/P-C 真的需要"可替换的案例存储"时再加，否则就是一个没人 import 的空接口。
+2. **`tests/fixtures/migrate/` 没有建**。V2 的期望值最终落在仓库根 `tests/fixtures/verify/baseline.json`（132 例的指纹），比"每例一个 fixture 文件"更容易审阅 diff。
+3. **`collect/inject/*.sh` 改成 `infra/hdfs/inject/*.sh`**。脚本要 `docker exec` 进容器执行（`dd` 写盘、`dfsadmin safemode`），必须被 compose 挂载；而采集链路调的是 Python 的 `collect/inject.py`（Windows 上不一定有 bash）。
+
 ---
 
 ## 9. 风险与未知
@@ -434,7 +507,15 @@ data/cases/<case_id>/
 
 ---
 
-## 10. 仍待拍板（我的建议已写在括号里）
+## 10. 决策台账（O1–O5 已落进代码，O6–O11 见下）
+
+| # | 决策点 | 状态 |
+|---|---|---|
+| **O1** | 是否采 HDFS 审计日志 | **已定：采**。`hdfs-audit.log` 是 NN 的第 2 条流（`file.py::hdfs_streams` order=1），也是 canonical 里唯一非 log4j 的语法；`log4j.properties` 给审计 logger 单独 appender 且 `additivity=false`，否则同一行进两条流 |
+| **O2** | DN 数量 | **已定：3**（`alcp-dn1..3`）。v0.4 起 `dfs.replication=3`，四类故障都能造 |
+| **O3** | 日志时区 | **已定：UTC**。容器 `TZ=UTC` + `%d{ISO8601}`；迁移的 WSL 51 例在 migrate 里按来源 −8h 平移到 UTC |
+| **O4** | 是否采 1 例 `DEBUG` 对照 | **未做**：`log4j.properties` 现在是 `rootLogger=INFO`。要做就在补样本矩阵时加一例（把它记进 `manifest.config_overrides`，否则同一批语料的 level 分布没法横向比） |
+| **O5** | S1 内采 3 例够不够 | **已定并超出：6 例**（`base_healthy_01/02`、`inc_dnvol_01/02`、`inc_net_02`、`inc_hb_01`）。剩余 16 例见 §3.4 的 22 例矩阵 |
 
 | # | 决策点 | 选项 | 我的建议 |
 |---|---|---|---|
@@ -448,7 +529,7 @@ data/cases/<case_id>/
 | **O8** | 是否采 `gc.log` | 采 / 不采 | **已闭环：不采**（v0.3 改）。Java 8 的 GC 行 `2026-11-22T11:46:27.166+0000: ...` 既不符 `hdfs_log4j` 也不符 `lab`，续行判据会把它整段拼进最后一条 DataNode 日志。要收它得先加 `jvm_gc` 档位 |
 | **O9** | 服务端 ERROR 从哪来 | — | **已闭环**：HDFS 服务端 ERROR 基本只来自**启动期致命失败**（`DiskChecker$DiskErrorException` / `Failed to acquire lock` / `Initialization failed for Block pool`）。运行期故障只打 WARN，所以 V6 改成"非 INFO >= 1"（§7） |
 | **O10** | `NN_SAFE_MODE` 造不出非 INFO | — | **已知空洞**：见 §7 下方说明，P-E 必须按"只有 INFO"来算这一族 |
-| **O11** | `id` 的行号是"读的先后"而非内容坐标 | 现在改 / 以后改 | **以后改**：V3 因此只断言"不重不漏 + 内容一致"，不比 id 序列与 `canonical_sha256`。真要改得让 id 由「流名 + 流内偏移」派生，属于 id 格式的 schema 变更，132 个迁移 pack 与 `tests/fixtures/verify/baseline.json` 都要重做（§7 的 O11 段有实测记录） |
+| **O11** | `id` 的行号是"读的先后"而非内容坐标 | 现在改 / 以后改 | **以后改**：V3 因此只断言"不重不漏 + 内容一致"，不比 id 序列与 `canonical_sha256`。真要改得让 id 由「流名 + 流内偏移」派生，属于 id 格式的 schema 变更，132 个迁移 pack 与仓库根的 `tests/fixtures/verify/baseline.json` 都要重做（§7 的 O11 段有实测记录） |
 
 ---
 
@@ -456,10 +537,10 @@ data/cases/<case_id>/
 
 | 对端 | P-A 给什么 | P-A 要什么 |
 |---|---|---|
-| P-B 索引 | `logs.jsonl`（喂 `case_report` 语料）、`labels.json` | 无 |
-| P-C 诊断 | `CasePack`（工具 `search_logs` / `get_event_evidence` 读它）、`anchors/index.json`（行级引用靠它） | 无 |
+| P-B 索引 | `logs.jsonl`（喂 `case_report` 语料）、`labels.json`；138 个 pack 即现成语料 | 无 |
+| P-C 诊断 | `CasePack`（工具 `search_logs` / `get_event_evidence` 读它）、`anchors/index.json`（行级引用靠它）、`store/query.py` 的 `search()`（现成的确定性检索，别再造一遍） | 无 |
 | P-D 飞轮 | `labels.json` 的 `reviewer` 字段（人工标注 = 最初的金标准） | 无 |
-| P-E 评测 | 12 例 + 132 例迁移结果 | 无 |
+| P-E 评测 | **6 例真采 + 132 例迁移**（真采例有 anchors、有 metrics；迁移例两者为空） | 无 |
 
 ---
 
@@ -467,6 +548,7 @@ data/cases/<case_id>/
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.6 | 2026-11-23 | **结项版**：新增 §0 结项状态（8900 行源码 / 457 条用例 / 138 个 pack / 闸门实况 / 四件未做）；§7 新增 **V10（产物可被人查询）** 并把 V1–V10 的最近一次结果回填成 §7.1 实况表；新增 §8.3 实际交付清单（逐文件行数 + 三处有意偏差：`ports.py` 未落地、`tests/fixtures/migrate/` 改仓库根 `tests/fixtures/verify/baseline.json`、`collect/inject/*.sh` 改 `infra/hdfs/inject/`）；§10 拆成"已落进代码（O1–O5）"与"仍待拍板/已知约束（O6–O11）"；§11 接口表按实物更正（6 例真采 + 132 例迁移、向 P-C 指明 `store/query.py` 已有检索实现）。同时修正头部版本号停在 v0.3 的笔误 |
 | v0.5 | 2026-11-23 | 收口（V3 / V4 / V7 从"演示过"变成命令）：新增 `collect/gates.py` + `scripts/verify_gates.py` + `make verify-gates`。V3 的口径按实测改写成"不重不漏 + 内容多重集合一致"，**不比 `id` 序列与 `canonical_sha256`**（新记 O11：`id` 里的行号是按"读的先后"发的，崩点会让同一毫秒的平局换位）。§10 补齐 O8–O11 的闭环状态 |
 | v0.4 | 2026-11-22 | 实采回填：§2.2/§2.3/§2.4 把 dn1 数据盘从 `128m` 改成 `2g`，改用 `dfs.blocksize=32m` + `dfs.replication=3`（块比盘大时 dn1 永远不接块，盘满无痕）；V6 从"ERROR>=1"改成"非 INFO>=1"（真实故障的日志表现几乎都是 WARN，ERROR 只在 DN 启动失败时出现），`audit_levels` 改为三条正向断言、不做反向断言；`expect` 门槛允许为 0 但和必须 >=1 |
 | v0.3 | 2026-11-22 | 实现回填（第 9 / 11 / 12 步）：§6.1 docker adapter 改成"把容器当远端文件系统、只用 `tail -c` 一套 offset 语义"，**不实现 `docker logs --since`**，stdout 改由 §2 的 `tee` 落盘（O7 闭环）。V6 收紧为"只对 `origin=collected` 成立"（迁移的 132 例里 104 例根本没有 ERROR），并补一段说明。V2 改成"独立第二实现 + `tests/fixtures/verify/baseline.json` 冻结基准"，差异白名单取消（A-R4 改为重新冻结基准并在提交里露 diff）。§8.2 M1.4 补 `store/verify.py` 与基准文件；A-R1 标已落地 |
