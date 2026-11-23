@@ -4,6 +4,10 @@
 和旧实验台（`aiops-fault-diagnosis-agent/ops/lab`）是同一套镜像与拓扑，但有四处关键改动，
 目的只有一个：**让日志能被采集器读到、且读到的字节与 `docker exec cat` 完全一致**。
 
+> 要照着一例一例采数据，看 [`docs/P-A_COLLECT_RUNBOOK.md`](../../docs/P-A_COLLECT_RUNBOOK.md)：
+> 采前体检、8 步流程、六个注入变体、24 例实测清单、留痕约定都在那里。
+> 本文件只讲"这个环境为什么长这样"。
+
 ## 起停
 
 ```bash
@@ -116,6 +120,9 @@ docker exec alcp-nn pkill -f /lab/bin/workload.sh
 `echo` 假行（那是自己伪造语料）。
 
 ## 采一个病例（`scripts/collect_case.py`）
+
+三步的完整版（含体检、验收、标注、复位）在 [`docs/P-A_COLLECT_RUNBOOK.md`](../../docs/P-A_COLLECT_RUNBOOK.md)；
+这里只留最短的三条示例：
 
 ```bash
 # 正常样本：从"现在"起跟随 5 分钟，指标 5s/30s 一起采

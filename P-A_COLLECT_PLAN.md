@@ -1,6 +1,6 @@
 # P-A 采集流水线 · 实现计划
 
-> **版本**：v0.12（2026-11-23）—— **结项版**：P-A 的代码线已全部落地，本文此后只做"事实回填"
+> **版本**：v0.13（2026-11-23）—— **结项版**：P-A 的代码线已全部落地，本文此后只做"事实回填"
 > **上游文档**：`IMPLEMENTATION_PLAN.md` v1.0 的 §4.1（P-A 段落）/ §5（CasePack 契约与目录形状）/ §7（S1 里程碑）/ §8.2（红线）
 > **本文边界**：只讲 **P-A（采集）** 这一段——采什么日志、用什么环境采、采哪些等级与窗口、A1/A2/A3 各做什么、怎么验收。
 > **不管**：窗口切分 / 模板 / 门禁 / 事件合并（那是旧项目已有的检测侧，新项目不复现）、检索与诊断（P-B / P-C）。
@@ -194,11 +194,16 @@ T-5min ────────── T0 ─────────────
 
 ## 4. 三种运行模式（同一条代码路径，三种参数）
 
+**实际能跑的命令**（v0.13 更正：本节此前写的是 `collect run --case …` 这种从未实现的写法）：
+
 | 模式 | 命令 | 采什么 | 何时用 |
 |---|---|---|---|
-| **baseline** | `collect run --case base_healthy_01 --minutes 20` | 全量日志 + 指标，无注入 | 建正常基线 |
-| **inject** | `collect run --case inc_dnvol_01 --minutes 20 --inject inject/dn_volume_full.sh` | 先采 5min，到点执行注入脚本，采满 20min，自动跑 `_restore.sh` | 采故障 |
-| **attach** | `collect run --case inc_x --resume` | 从 `checkpoint.adapter_state` 续采 | 中途中断 / 分两次采 |
+| **baseline** | `make collect CASE=base_healthy_01 ARGS="--minutes 5"` | 从"现在"起跟随 N 分钟；指标 `docker stats` 5s、`dfsadmin -report` + `df` 30s 一起写进 `metrics.jsonl` | 建正常基线 |
+| **inject** | `make collect CASE=inc_dnvol_01 ARGS="--inject dn_volume --inject-target alcp-dn1 --root-cause DN_VOLUME --minutes 2 --fault-minutes 5 --recovery-minutes 2"` | 三段窗口显式声明后，采到 `phases[fault].since` 时执行注入并记 `started`，采满后 restore 并记 `ended/restored` | 采故障 |
+| **attach** | 库层 `Collector.collect(mode=CollectMode.ATTACH)`（**CLI 尚未暴露**，见 §10 O14） | 从 `checkpoint.json` 的 `offset` / `line_no` / `tail_line_sha1` 续采 | 中途中断 / 分两次采 |
+
+**一例从体检到归档的逐条命令**在 [`docs/P-A_COLLECT_RUNBOOK.md`](docs/P-A_COLLECT_RUNBOOK.md)：采前体检四步、
+采集 8 步、六个注入变体、24 例实测参数表、留痕约定（什么进 `manifest`、什么进 `labels`、什么故意不记）。
 
 **注入编排必须在采集器里，不能手工敲**：手工敲无法保证"注入时刻"与"日志时间"对齐，而 `labels.fault_injection.started` 正是报告里"异常起点"的 ground truth。采集器负责：`T0` 记录 → 执行脚本 → 记录 `started/ended` → 采满 → 执行 restore → 记录 `restored`。
 
@@ -565,7 +570,7 @@ data/cases/<case_id>/
 
 ---
 
-## 10. 决策台账（O1–O5 已落进代码，O6–O11 见下）
+## 10. 决策台账（O1–O5 已落进代码，O6–O14 见下）
 
 | # | 决策点 | 状态 |
 |---|---|---|
@@ -573,7 +578,7 @@ data/cases/<case_id>/
 | **O2** | DN 数量 | **已定：3**（`alcp-dn1..3`）。v0.4 起 `dfs.replication=3`，四类故障都能造 |
 | **O3** | 日志时区 | **已定：UTC**。容器 `TZ=UTC` + `%d{ISO8601}`；迁移的 WSL 51 例在 migrate 里按来源 −8h 平移到 UTC |
 | **O4** | 是否采 1 例 `DEBUG` 对照 | **已做（v0.10）**：`log4j.properties` 的 root level 改成 `${hadoop.root.logger}`，compose 用 `HADOOP_ROOT_LOGGER`（默认 `INFO,RFA`）切换。采了 `base_healthy_debug_01`：2 分钟 10638 条，比 INFO 档的 `base_healthy_01` 高 **16.7 倍**，`parse_failed` 硬失败 0、partial 1162 条（Java 栈被正确归并），`config_overrides={"log_level":"DEBUG"}` 记进 manifest |
-| **O5** | S1 内采 3 例够不够 | **已定并超出：6 例**（`base_healthy_01/02`、`inc_dnvol_01/02`、`inc_net_02`、`inc_hb_01`）。剩余 16 例见 §3.4 的 22 例矩阵 |
+| **O5** | S1 内采 3 例够不够 | **已定并大幅超出：24 例真采**（`base_*` 6、`inc_dnvol_*` 5、`inc_hb_*` 6、`inc_net_*` 6、`inc_safemode_05` 1），逐例参数见 `docs/P-A_COLLECT_RUNBOOK.md` §4 |
 
 | # | 决策点 | 选项 | 我的建议 |
 |---|---|---|---|
@@ -590,6 +595,7 @@ data/cases/<case_id>/
 | **O11** | `id` 的行号是"读的先后"而非内容坐标 | 现在改 / 以后改 | **以后改**：V3 因此只断言"不重不漏 + 内容一致"，不比 id 序列与 `canonical_sha256`。真要改得让 id 由「流名 + 流内偏移」派生，属于 id 格式的 schema 变更，132 个迁移 pack 与仓库根的 `tests/fixtures/verify/baseline.json` 都要重做（§7 的 O11 段有实测记录） |
 | **O12** | 客户端（FsShell）失败行没有时间戳，被续行判据并进上一条记录 | — | **v0.9 已修**：`canonicalize` 在续行分支之前认出 `<命令>: <消息>`（闭集约 40 个 FsShell 子命令），单独成条、级别 WARN、时间戳继承上一条、`parse_status=partial`、`raw` 留原文。**只对 `hdfs_log4j` 生效**（`lab` 一个字节不动，132 个迁移 pack 的 `canonical_sha256` 因此完全没变，V2 仍是 132/132） |
 | **O13** | 客户端失败行的 `ts` 是"继承"来的，不是自带的 | 现在改 / 以后改 | **记录在案，暂不改**：O12 的修复把这批行留成了 `parse_status=partial`，但它们的 `ts` 只是上一条 log4j 记录的时间 —— `inc_safemode_05` 实测 113 条 `FsShell` WARN 全落在 `recovery` 段（故障段只有 2 条噪声），因为注入期间客户端一条带时间戳的行都没写。**后果**：`phase_map` 对这批记录不可信，P-C 做"故障段召回"时不能按 `ts` 归属它们。真要修得让 workload 的每行输出自带时间戳（改 `workload.sh` 的 stderr 前缀），代价是客户端日志不再是"原样"而是"我们加的格式" |
+| **O14** | 续采（`attach`）没有 CLI 入口 | 补 `--attach` / 维持库层 | **维持库层**：`CollectMode.ATTACH` 已实现并有测试（读 `checkpoint.json`、先验 `tail_line_sha1` 再从 `offset+1` 读、拒绝 `resume_from`），但 `scripts/collect_case.py` 只跑 `BASELINE`/`INJECT`。中断一例目前只能删掉重采。要补就是在 CLI 加 `--attach` 把 `mode=ATTACH` 传下去，其余参数不变（`docs/P-A_COLLECT_RUNBOOK.md` §7 第 4 条） |
 
 ---
 
@@ -597,10 +603,10 @@ data/cases/<case_id>/
 
 | 对端 | P-A 给什么 | P-A 要什么 |
 |---|---|---|
-| P-B 索引 | `logs.jsonl`（喂 `case_report` 语料）、`labels.json`；155 个 pack 即现成语料 | 无 |
+| P-B 索引 | `logs.jsonl`（喂 `case_report` 语料）、`labels.json`；156 个 pack 即现成语料 | 无 |
 | P-C 诊断 | `CasePack`（工具 `search_logs` / `get_event_evidence` 读它）、`anchors/index.json`（行级引用靠它）、`store/query.py` 的 `search()`（现成的确定性检索，别再造一遍）、`ports.CaseStore` + `store/casestore.py`（读接口，v0.9 起可用） | 无 |
 | P-D 飞轮 | `labels.json` 的 `reviewer` 字段（人工标注 = 最初的金标准） | 无 |
-| P-E 评测 | **23 例真采 + 132 例迁移**（真采例有 anchors、有 metrics；迁移例两者为空） | 无 |
+| P-E 评测 | **24 例真采 + 132 例迁移**（真采例有 anchors、有 metrics；迁移例两者为空） | 无 |
 
 ---
 
@@ -608,6 +614,7 @@ data/cases/<case_id>/
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.13 | 2026-11-23 | **新增真实采集运行手册** `docs/P-A_COLLECT_RUNBOOK.md`（采前体检 4 步 / 采集 8 步 / 六个注入变体 / 24 例实测参数表 / 留痕约定 / 复位清单 / 核心脚本清单）；§4 的三种模式命令改成实际能跑的（此前写的是从未实现的 `collect run --case …`）；§10 新增 **O14**（续采无 CLI 入口）；O5 回填 24 例；§11 计数改 156 pack / 24 例真采 |
 | v0.12 | 2026-11-23 | **改名一处**：`make` 目标 `ask` → `ask-case`（P-A 的 `make ask` 与 P-B 的 `make ask Q=` 撞名，P-B 需要 `ask` 这个名字；脚本仍是 `scripts/ask.py`，行为不变）。同步 §7 V10 的两处命令与 §8.3 的说明 |
 | v0.11 | 2026-11-23 | **格式统一性实测与两处修正**：①新增 §5.5（156 个 pack 逐字节审计的结果表）；②`logs.ts` 的 4 行微秒（续行兜底 `since`）→ `canonicalize()` 截到毫秒，只重迁这 4 例、重冻基准后 132/132；③`metrics.ts` 微秒 → `MetricPoint` 截到毫秒，存量 24 个 pack 的 `metrics.jsonl` 就地重写 9838 行；④§5 的 `logs.jsonl` 字段表更正 `id` 的 `line_no` 语义（读序，见 O11）并补 `metrics.jsonl` 字段表；⑤`verify-collect --update-baseline` 修成**只冻结 `origin=migrated`**（新采例每个窗口的时间戳都不同，冻进退化成回归失败） |
 | v0.10 | 2026-11-23 | **补 O4 的 DEBUG 对照例**：①`log4j.properties` 的 root level 从硬编码 `INFO, RFA` 改成 `${hadoop.root.logger}`，compose 每个 service 加 `HADOOP_ROOT_LOGGER: "${HADOOP_ROOT_LOGGER:-INFO,RFA}"` —— 采对照例时 `$env:HADOOP_ROOT_LOGGER="DEBUG,RFA"; docker compose up -d`，采完 up 回默认，**不动仓库文件**；②`Collector` 新增 `config_overrides`，`scripts/collect_case.py` 新增 `--config-override KEY=VALUE`（严格拒绝无等号/空键/重复键），保证"这一例现场不同"能被事后解释；③采 `base_healthy_debug_01`（2 分钟）：10638 条（DEBUG 9949 / INFO 682 / WARN 7）、原始 15764 行、硬失败 0 条、partial 1162 条（Java 栈正确归并）、窗口外丢弃 170、`pack-lint` PASS；**同一份代码下比 INFO 档快 16.7 倍**（318 → 5319 条/分）；④`describe` 输出把"解析异常（partial+failed）"与"硬失败（failed）"分开报，避免 DEBUG 档下把正常的栈归并误读成解析器坏了；⑤§0/§3.4/§7.1 V5/§10 O4 回填（156 pack / 24 例真采） |

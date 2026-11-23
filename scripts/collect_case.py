@@ -178,7 +178,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--inject-target",
         default=None,
-        help="注入目标容器（如 alcp-dn1）；不写用该变体的默认目标",
+        help=(
+            "注入目标容器（如 alcp-dn1）；不写用该变体的默认目标。"
+            "会自动写进 manifest.config_overrides"
+        ),
     )
     parser.add_argument("--root-cause", default=None, help="根因码（正常例留空）")
     parser.add_argument("--fault-minutes", type=float, default=10.0)
@@ -236,6 +239,22 @@ def main(argv: list[str] | None = None) -> int:
         reviewer="collect_case.py",
     )
 
+    overrides = _overrides(args.config_override)
+    # 注入的**变体与目标**属于"这一例现场"的一部分，必须留在 manifest 里。
+    # `labels.fault_injection.script` 只记变体（如 `inject/dn_volume_fill`），
+    # 不记打在哪台 DN 上 —— 2026-11-23 前采的 24 例因此无法从包里回答
+    # "network_disconnect 断的是 dn1 还是 dn3"（见 docs/P-A_COLLECT_RUNBOOK.md §7）。
+    if args.inject is not None:
+        overrides.setdefault("inject_variant", args.inject)
+        if args.inject_target:
+            previous = overrides.get("inject_target")
+            if previous is not None and previous != args.inject_target:
+                raise SystemExit(
+                    f"[error] --config-override inject_target={previous} 与 "
+                    f"--inject-target {args.inject_target} 冲突"
+                )
+            overrides["inject_target"] = args.inject_target
+
     collector = Collector(
         root,
         case_id=args.case,
@@ -250,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         redactor=PatternRedactor(),
         metrics=_metrics_session(),
         start_at_end=True,
-        config_overrides=_overrides(args.config_override),
+        config_overrides=overrides,
     )
 
     mode, hook = CollectMode.BASELINE, None
