@@ -267,7 +267,7 @@ def network_disconnect(
 def dn_disk_broken(
     *,
     container: str = "alcp-dn2",
-    volume: str = "aiops-log-copilot_dn2-data",
+    volume: str | None = None,
     duration: timedelta = timedelta(minutes=5),
     image: str = "apache/hadoop:3.3.6",
 ) -> InjectionPlan:
@@ -286,6 +286,9 @@ def dn_disk_broken(
     格式化该卷 —— 卷里的块丢失，集群先欠副本、再由另外两台补齐，这是可接受的
     实验代价（`replication=3` 保证不会真丢数据）。
     """
+    # 卷名由容器名推出来（`alcp-dn3` → `aiops-log-copilot_dn3-data`），这样
+    # `--inject-target alcp-dn3` 不必再手写卷名；卷名与容器名对不上时传 `volume`。
+    volume = volume or f"{DEFAULT_NETWORK.split('_')[0]}_{container.removeprefix('alcp-')}-data"
     return InjectionPlan(
         name="inject/dn_disk_broken",
         family="dn_volume",

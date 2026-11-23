@@ -59,6 +59,11 @@ def main(argv: list[str] | None = None) -> int:
         metavar="N",
         help="手工指定 ERROR 门槛（服务端日志里几乎恒为 0，除非 DN 启动失败）",
     )
+    parser.add_argument(
+        "--components",
+        default=None,
+        help="手工指定 expect.error_components（逗号分隔，如 dn1,dn2,dn3,nn）",
+    )
     parser.add_argument("--force", action="store_true", help="覆盖已经填过的 expect")
     parser.add_argument("--check", action="store_true", help="只看现状，不写")
     args = parser.parse_args(argv)
@@ -67,6 +72,12 @@ def main(argv: list[str] | None = None) -> int:
     if not root.is_absolute():
         root = REPO_ROOT / root
     paths = pack_paths(root, args.case)
+
+    chosen = (
+        tuple(c.strip() for c in args.components.split(",") if c.strip())
+        if args.components
+        else None
+    )
 
     try:
         before = describe(paths)
@@ -95,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
             # 直接当门槛用，重采一次只要少一条 WARN 就红。
             min_warn=args.min_warn,
             min_error=args.min_error,
+            components=chosen,
             force=args.force,
         )
     except (LabelError, ValueError) as exc:

@@ -149,6 +149,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--case", required=True, help="病例 id，例如 base_healthy_01")
     parser.add_argument("--minutes", type=float, default=5.0, help="基线时长（分钟）")
     parser.add_argument("--inject", choices=sorted(INJECTIONS), default=None)
+    # 同一个变体换个目标容器，就是矩阵里的另一例（`inc_hb_02` 停 dn2、
+    # `inc_hb_03` pause dn1……）。不写就用构造器的默认目标。
+    parser.add_argument(
+        "--inject-target",
+        default=None,
+        help="注入目标容器（如 alcp-dn1）；不写用该变体的默认目标",
+    )
     parser.add_argument("--root-cause", default=None, help="根因码（正常例留空）")
     parser.add_argument("--fault-minutes", type=float, default=10.0)
     parser.add_argument("--recovery-minutes", type=float, default=5.0)
@@ -213,7 +220,8 @@ def main(argv: list[str] | None = None) -> int:
 
     mode, hook = CollectMode.BASELINE, None
     if args.inject is not None:
-        plan = INJECTIONS[args.inject](duration=timedelta(minutes=args.fault_minutes))
+        extra = {"container": args.inject_target} if args.inject_target else {}
+        plan = INJECTIONS[args.inject](duration=timedelta(minutes=args.fault_minutes), **extra)
         hook = CommandInjection(plan, runner=docker_runner, dry_run=args.dry_run)
         mode = CollectMode.INJECT
         print(f"[plan] {plan.describe()}")

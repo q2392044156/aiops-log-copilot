@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from ..domain.case import Expect, Labels, RootCause, Severity
@@ -127,6 +128,7 @@ def annotate(
     from_measurements: bool = False,
     min_error: int | None = None,
     min_warn: int | None = None,
+    components: Sequence[str] | None = None,
     force: bool = False,
 ) -> Labels:
     """改 `labels.json` 里点名的那几个字段，其余原样保留。
@@ -150,6 +152,14 @@ def annotate(
             min_error_lines=min_error if min_error is not None else expect.min_error_lines,
             min_warn_lines=min_warn if min_warn is not None else expect.min_warn_lines,
             error_components=expect.error_components,
+        )
+    if expect is not None and components is not None:
+        # 组件同理：实测份额只说明"谁话多"，不说明"谁该负责"。注入目标常常
+        # 是份额 10% 的那台机器，`dominant_components` 会把它筛掉。
+        expect = Expect(
+            min_error_lines=expect.min_error_lines,
+            min_warn_lines=expect.min_warn_lines,
+            error_components=tuple(components),
         )
     if expect is not None and current.expect is not None and not force:
         raise LabelError("labels.expect 已存在；要覆盖请显式 force=True（门槛被改就等于 V6 失效）")
